@@ -333,7 +333,7 @@ void matmul(Tensor A, Tensor B, Tensor C, size_t M, size_t N, size_t K) {
   assert(B.sz == (K * N));
   assert(C.sz == (M * N));
   
-  
+  /*
   long ranges[num_threads];
   int left = 0, right;
   for (int i = 0; i < num_threads; i++){
@@ -350,17 +350,19 @@ void matmul(Tensor A, Tensor B, Tensor C, size_t M, size_t N, size_t K) {
   for (int i = 0; i < num_threads; i++)
     pthread_join(threads[i], NULL);
   
-  /*
-  for (int m = 0; m < M; m++) {
-    for (int n = 0; n < N; n++) {
+  
+  */
+  for (size_t m = 0; m < M; m++) {
+    for (size_t n = 0; n < N; n++) {
       float acc = 0.0f;
-      for (int k = 0; k < K; k++) {
-        acc += A.buf[k * M + m] * B.buf[n * K + k];
+      for (size_t k = 0; k < K; k++) {
+        acc += A.buf[m * K + k] * B.buf[k * N + n];
       }
-      C.buf[n * M + m] = acc;
+      C.buf[m * N + n] = acc;
     }
   }
-  */
+  
+  
 }
 
 // stride = 2, pad = 1
@@ -370,11 +372,12 @@ void im2col(Tensor input, size_t filter_height, size_t filter_width, Tensor &out
   output.alloc_once({OH, OW, R, S, C});
   for (size_t oh = 0; oh < OH; oh++) {
     for (size_t ow = 0; ow < OW; ow++) {
-      size_t ih = oh * 2 - 1;
-      size_t iw = ow * 2 - 1;
       for (size_t r = 0; r < R; r++) {
         for (size_t s = 0; s < S; s++) {
-          for (size_t c = 0; c > C; c++) {
+          size_t ih = oh * 2 - 1 + r;
+          size_t iw = ow * 2 - 1 + s;
+          if (ih < 0 || ih >= H || iw < 0 || iw >= W) continue;
+          for (size_t c = 0; c < C; c++) {
             output.buf[(oh * OW + ow) * (R * S * C) + (r * S * C + s * C + c)] = input.buf[ih * W * C + iw * C + c];
           }
         }
