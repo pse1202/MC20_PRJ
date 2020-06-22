@@ -15,4 +15,4 @@ clean:
 	rm -rf $(TARGET) $(OBJECTS)
 
 run: $(TARGET)
-	thorq --add ./$(TARGET) ../common/edges2cats_AtoB.bin $(ARGS)
+	thorq --add --name pix2pix_A ./$(TARGET) ../common/edges2cats_AtoB.bin $(ARGS)
