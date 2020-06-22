@@ -7,7 +7,7 @@
 #include <cmath>
 #include <cassert>
 #include <stdio.h>
-#include <pthread.h>
+
 
 class Tensor {
 public:
@@ -306,68 +306,17 @@ void get_one_image(Tensor input, Tensor &output, size_t idx) {
   }
 }
 
-static float *_A, *_B, *_C;
-static int  _M, _N, _K;
-static int num_threads = 32, max_block = 16;
-
-static void* mat_mul_thread(void *data) {
-  long l = *((long *)  data);
-  int lrange = (int) (l >> 32);
-  int rrange = (int) l;
-  while (lrange < rrange) {
-    int block_size = rrange - lrange > max_block ? max_block : rrange - lrange;
-    for (int k = 0; k < _K; ++k) {
-      for (int i = lrange; i < lrange + block_size; i++){
-        for (int j = 0; j < _N; j++){
-          _C[i * _N + j] += _A[i * _K + k] * _B[k * _N + j];
-        }
-      }
-    }
-    lrange += block_size;
-  }
-  return NULL;
-}
-
 void matmul(Tensor A, Tensor B, Tensor C, size_t M, size_t N, size_t K) {
   assert(A.sz == (M * K));
   assert(B.sz == (K * N));
   assert(C.sz == (M * N));
-  
-  
-  long ranges[num_threads];
-  int left = 0, right;
-  for (int i = 0; i < num_threads; i++){
-    right = left + (M / num_threads) + (M % num_threads > i);
-    ranges[i] = ((long) left << 32) | ((long) right & 0xFFFFFFFFL);
-    left = right;
-  }
-  _A = A.buf, _B = B.buf, _C = C.buf;
-  _M = M, _N = N, _K = K;
-  pthread_t threads[num_threads];
-  for (int i = 0; i < num_threads; i++)
-    pthread_create(&threads[i], NULL, mat_mul_thread, &ranges[i]);
-  
-  for (int i = 0; i < num_threads; i++)
-    pthread_join(threads[i], NULL);
-  
-  /*
-  for (int m = 0; m < M; m++) {
-    for (int n = 0; n < N; n++) {
-      float acc = 0.0f;
-      for (int k = 0; k < K; k++) {
-        acc += A.buf[k * M + m] * B.buf[n * K + k];
-      }
-      C.buf[n * M + m] = acc;
-    }
-  }
-  */
 }
 
 // stride = 2, pad = 1
 void im2col(Tensor input, size_t filter_height, size_t filter_width, Tensor &output) {
   size_t H = input.shape[0], W = input.shape[1], C = input.shape[2];
   size_t OH = H / 2, OW = W / 2, R = filter_height, S = filter_width;
-  output.alloc_once({OH, OW, R, S, C});
+  output.alloc_once({OH, OW, filter_height, filter_weight, C});
   for (size_t oh = 0; oh < OH; oh++) {
     for (size_t ow = 0; ow < OW; ow++) {
       size_t ih = oh * 2 - 1;
@@ -375,7 +324,7 @@ void im2col(Tensor input, size_t filter_height, size_t filter_width, Tensor &out
       for (size_t r = 0; r < R; r++) {
         for (size_t s = 0; s < S; s++) {
           for (size_t c = 0; c > C; c++) {
-            output.buf[(oh * OW + ow) * (R * S * C) + (r * S * C + s * C + c)] = input.buf[ih * W * C + iw * C + c];
+            output[(oh * OW + ow) * (R * S * C) + (r * S * C + s * C + c)] = input.buf[ih * W * C + iw * C + c];
           }
         }
       }
