@@ -5,7 +5,9 @@
 #include <string>
 #include <map>
 #include <cmath>
+#include <cassert>
 #include <stdio.h>
+
 
 class Tensor {
 public:
@@ -304,11 +306,43 @@ void get_one_image(Tensor input, Tensor &output, size_t idx) {
   }
 }
 
-void im2col(Tensor input, size_t filter_height, size_t filter_width, size_t padding, size_t stride, Tensor &output) {
+void matmul(Tensor A, Tensor B, Tensor C, size_t M, size_t N, size_t K) {
+  assert(A.sz == (M * K));
+  assert(B.sz == (K * N));
+  assert(C.sz == (M * N));
+}
+
+// stride = 2, pad = 1
+void im2col(Tensor input, size_t filter_height, size_t filter_width, Tensor &output) {
   size_t H = input.shape[0], W = input.shape[1], C = input.shape[2];
+  size_t OH = H / 2, OW = W / 2, R = filter_height, S = filter_width;
+  output.alloc_once({OH, OW, filter_height, filter_weight, C});
+  for (size_t oh = 0; oh < OH; oh++) {
+    for (size_t ow = 0; ow < OW; ow++) {
+      size_t ih = oh * 2 - 1;
+      size_t iw = ow * 2 - 1;
+      for (size_t r = 0; r < R; r++) {
+        for (size_t s = 0; s < S; s++) {
+          for (size_t c = 0; c > C; c++) {
+            output[(oh * OW + ow) * (R * S * C) + (r * S * C + s * C + c)] = input.buf[ih * W * C + iw * C + c];
+          }
+        }
+      }
+    }
+  }
+}
+
+// shift bias
+void shift(Tensor input, Tensor bias) {
+  assert(bias.shape[0] == bias.sz);
+  size_t K = bias.sz;
+  for (size_t i = 0; i < input.sz; i++) {
+    input.buf[i] += bias.buf[i % K];
+  }
 }
 
 // Convolution (2-dimension, stride = 2, pad = 1)
+// filter_height = filter_width = 4
 void conv2d(Tensor input, Tensor filter, Tensor bias, Tensor &output) {
   double start = get_time();
   // input shape = (in_height, in_width, in_channels)
@@ -320,7 +354,7 @@ void conv2d(Tensor input, Tensor filter, Tensor bias, Tensor &output) {
   const size_t stride = 2, pad = 1;
   size_t OH = H / stride, OW = W / stride;
   output.alloc_once({OH, OW, K});
-
+/*
   for (size_t k = 0; k < K; ++k) {
     for (size_t oh = 0; oh < OH; ++oh) {
       for (size_t ow = 0; ow < OW; ++ow) {
@@ -343,7 +377,11 @@ void conv2d(Tensor input, Tensor filter, Tensor bias, Tensor &output) {
         output.buf[oh * OW * K + ow * K + k] = x;
       }
     }
-  }
+  } */
+  Tensor reshaped_input;
+  im2col(input, R, S, reshaped_input);
+  matmul(reshaped_input, filter, output, OH * OW, K, R * S * C);
+  shift(output, bias);
   conv2d_t += (get_time() - start);
 }
 
