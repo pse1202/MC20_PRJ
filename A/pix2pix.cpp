@@ -333,7 +333,7 @@ void matmul(Tensor A, Tensor B, Tensor C, size_t M, size_t N, size_t K) {
   assert(B.sz == (K * N));
   assert(C.sz == (M * N));
   
-  /*
+  
   long ranges[num_threads];
   int left = 0, right;
   for (int i = 0; i < num_threads; i++){
@@ -351,7 +351,7 @@ void matmul(Tensor A, Tensor B, Tensor C, size_t M, size_t N, size_t K) {
     pthread_join(threads[i], NULL);
   
   
-  */
+  /*
   for (size_t m = 0; m < M; m++) {
     for (size_t n = 0; n < N; n++) {
       float acc = 0.0f;
@@ -360,7 +360,7 @@ void matmul(Tensor A, Tensor B, Tensor C, size_t M, size_t N, size_t K) {
       }
       C.buf[m * N + n] = acc;
     }
-  }
+  } */
   
   
 }
@@ -391,7 +391,7 @@ void shift(Tensor input, Tensor bias) {
   assert(bias.shape[0] == bias.sz);
   size_t K = bias.sz;
   for (size_t i = 0; i < input.sz; i++) {
-    input.buf[i] += bias.buf[i % K];
+    input.buf[i] = bias.buf[i % K];
   }
 }
 
@@ -434,8 +434,9 @@ void conv2d(Tensor input, Tensor filter, Tensor bias, Tensor &output) {
   } */
   Tensor reshaped_input;
   im2col(input, R, S, reshaped_input);
-  matmul(reshaped_input, filter, output, OH * OW, K, R * S * C);
   shift(output, bias);
+  matmul(reshaped_input, filter, output, OH * OW, K, R * S * C);
+//  shift(output, bias);
   conv2d_t += (get_time() - start);
 }
 
