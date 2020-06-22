@@ -5,6 +5,7 @@
 #include <string>
 #include <map>
 #include <cmath>
+#include <stdio.h>
 
 class Tensor {
 public:
@@ -40,6 +41,9 @@ static void relu(Tensor input, Tensor &output);
 static void batchnorm(Tensor input, Tensor scale, Tensor offset, Tensor &output);
 static void concat(Tensor input0, Tensor input1, Tensor &output);
 static void elem_tanh(Tensor input, Tensor &output);
+
+// Profilers
+static double conv2d_t = 0, conv2d_tr_t = 0, leaky_relu_t = 0, relu_t = 0, batchnorm_t = 0, concat_t = 0, tanh_t = 0;
 
 void pix2pix_init() {
   /*
@@ -132,6 +136,14 @@ void pix2pix(uint8_t *input_buf, float *weight_buf, uint8_t *output_buf, size_t 
     // Put a image into output buffer
     postprocess_one_image(decoder_layer[1], output_buf, img_idx);
   }
+
+  printf("Conv2D: %f\n", conv2d_t);
+  printf("Conv2D Transpose: %f\n", conv2d_tr_t);
+  printf("LeakyRelu: %f\n", leaky_relu_t);
+  printf("Relu: %f\n", relu_t);
+  printf("BatchNorm: %f\n", batchnorm_t);
+  printf("Concat: %f\n", concat_t);
+  printf("Tanh: %f\n", tanh_t);
 }
 
 Tensor::Tensor() : buf(NULL) {}
@@ -292,8 +304,13 @@ void get_one_image(Tensor input, Tensor &output, size_t idx) {
   }
 }
 
+void im2col(Tensor input, size_t filter_height, size_t filter_width, size_t padding, size_t stride, Tensor &output) {
+  size_t H = input.shape[0], W = input.shape[1], C = input.shape[2];
+}
+
 // Convolution (2-dimension, stride = 2, pad = 1)
 void conv2d(Tensor input, Tensor filter, Tensor bias, Tensor &output) {
+  double start = get_time();
   // input shape = (in_height, in_width, in_channels)
   // filter shape = (filter_height, filter_width, in_channels, output_channels)
   // bias shape = (output_channels)
@@ -327,10 +344,12 @@ void conv2d(Tensor input, Tensor filter, Tensor bias, Tensor &output) {
       }
     }
   }
+  conv2d_t += (get_time() - start);
 }
 
 // Transposed convolution (2-dimension, stride = 2, pad = 1)
 void conv2d_transposed(Tensor input, Tensor filter, Tensor bias, Tensor &output) {
+  double start = get_time();
   // input shape = (in_height, in_width, in_channels)
   // filter shape = (filter_height, filter_width, output_channels, in_channels)
   // bias shape = (output_channels)
@@ -367,10 +386,12 @@ void conv2d_transposed(Tensor input, Tensor filter, Tensor bias, Tensor &output)
       }
     }
   }
+  conv2d_tr_t += (get_time() - start);
 }
 
 // Leaky ReLU
 void leaky_relu(Tensor input, Tensor &output, float alpha) {
+  double start = get_time();
   // input shape = (height, width, channels)
   // output shape = (height, width, channels)
   size_t H = input.shape[0], W = input.shape[1], C = input.shape[2];
@@ -378,10 +399,12 @@ void leaky_relu(Tensor input, Tensor &output, float alpha) {
   for (size_t i = 0; i < H * W * C; ++i) {
     output.buf[i] = input.buf[i] >= 0 ? input.buf[i] : alpha * input.buf[i];
   }
+  leaky_relu_t += (get_time() - start);
 }
 
 // ReLU
 void relu(Tensor input, Tensor &output) {
+  double start = get_time();
   // input shape = (height, width, channels)
   // output shape = (height, width, channels)
   size_t H = input.shape[0], W = input.shape[1], C = input.shape[2];
@@ -389,10 +412,12 @@ void relu(Tensor input, Tensor &output) {
   for (size_t i = 0; i < H * W * C; ++i) {
     output.buf[i] = input.buf[i] >= 0 ? input.buf[i] : 0;
   }
+  relu_t += (get_time() - start);
 }
 
 // Batch normalization (channel-wise)
 void batchnorm(Tensor input, Tensor scale, Tensor offset, Tensor &output) {
+  double start = get_time();
   // input shape = (height, width, channels)
   // scale shape = (channels)
   // offset shape = (channels)
@@ -426,10 +451,12 @@ void batchnorm(Tensor input, Tensor scale, Tensor offset, Tensor &output) {
       }
     }
   }
+  batchnorm_t += (get_time() - start);
 }
 
 // Concatenation (along channel dimension)
 void concat(Tensor input0, Tensor input1, Tensor &output) {
+  double start = get_time();
   // input0 shape = (height, width, channels0)
   // input1 shape = (height, width, channels1)
   // output shape = (height, width, channels0 + channels1)
@@ -446,10 +473,12 @@ void concat(Tensor input0, Tensor input1, Tensor &output) {
       }
     }
   }
+  concat_t += (get_time() - start);
 }
 
 // Elementwise tanh
 void elem_tanh(Tensor input, Tensor &output) {
+  double start = get_time();
   // input shape = (height, width, channels)
   // output shape = (height, width, channels)
   size_t H = input.shape[0], W = input.shape[1], C = input.shape[2];
@@ -457,4 +486,5 @@ void elem_tanh(Tensor input, Tensor &output) {
   for (size_t i = 0; i < H * W * C; ++i) {
     output.buf[i] = tanhf(input.buf[i]);
   }
+  tanh_t += (get_time() - start);
 }
