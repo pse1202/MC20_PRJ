@@ -6,6 +6,7 @@
 #include <map>
 #include <cmath>
 #include <cassert>
+#include <cstring>
 #include <stdio.h>
 #include <pthread.h>
 
@@ -350,19 +351,6 @@ void matmul(Tensor A, Tensor B, Tensor C, size_t M, size_t N, size_t K) {
   for (int i = 0; i < num_threads; i++)
     pthread_join(threads[i], NULL);
   
-  
-  /*
-  for (size_t m = 0; m < M; m++) {
-    for (size_t n = 0; n < N; n++) {
-      float acc = 0.0f;
-      for (size_t k = 0; k < K; k++) {
-        acc += A.buf[m * K + k] * B.buf[k * N + n];
-      }
-      C.buf[m * N + n] = acc;
-    }
-  } */
-  
-  
 }
 
 // stride = 2, pad = 1
@@ -436,9 +424,45 @@ void conv2d(Tensor input, Tensor filter, Tensor bias, Tensor &output) {
   im2col(input, R, S, reshaped_input);
   shift(output, bias);
   matmul(reshaped_input, filter, output, OH * OW, K, R * S * C);
-//  shift(output, bias);
   conv2d_t += (get_time() - start);
 }
+
+void im2col_tr(Tensor input, size_t filter_height, size_t filter_width, Tensor &output) {
+  size_t H = input.shape[0], W = input.shape[1], C = input.shape[2];
+  size_t OH = H * 2, OW = W * 2, R = filter_height, S = filter_width;
+  output.alloc_once({OH, OW, R, S, C});
+  for (size_t oh = 0; oh < OH; oh++) {
+    for (size_t ow = 0; ow < OW; ow++) {
+      for (size_t r = 0; r < R; r++) {
+        for (size_t s = 0; s < S; s++) {
+          size_t raw_h = (oh - r + 1), raw_w = (ow - s + 1);
+          if (raw_h % 2 != 0 || raw_w % 2 != 0) continue;
+          size_t ih = raw_h / 2, iw = raw_w / 2;
+          if (ih < 0 || ih >= H || iw < 0 || iw >= W) continue;
+          for (size_t c = 0; c < C; c++) {
+            output.buf[(oh * OW + ow) * (R * S * C) + (r * S * C + s * C + c)] = input.buf[ih * W * C + iw * C + c];
+          }
+        }
+      }
+    }
+  } 
+}
+
+void reshape_filter(Tensor input) {
+  size_t R = input.shape[0], S = input.shape[1], K = input.shape[2], C = input.shape[3];
+  float *tmp = (float*) malloc(K*C*sizeof(float));
+  for (size_t r = 0; r < R; r++) {
+    for (size_t s = 0; s < S; s++) {
+      for (size_t k = 0; k < K; k++) {
+        for (size_t c = 0; c < C; c++) {
+          tmp[K * c + k] = input.buf[(r * S + s) * K * C + (k * C + c)];
+        }
+      }
+      memcpy(&input.buf[(r * S + s) * K * C], tmp, K * C * sizeof(float));
+    }
+  }
+}
+
 
 // Transposed convolution (2-dimension, stride = 2, pad = 1)
 void conv2d_transposed(Tensor input, Tensor filter, Tensor bias, Tensor &output) {
@@ -453,7 +477,7 @@ void conv2d_transposed(Tensor input, Tensor filter, Tensor bias, Tensor &output)
   const size_t stride = 2, pad = 1;
   size_t OH = H * stride, OW = W * stride;
   output.alloc_once({OH, OW, K});
-
+/*
   for (size_t k = 0; k < K; ++k) {
     for (size_t oh = 0; oh < OH; ++oh) {
       for (size_t ow = 0; ow < OW; ++ow) {
@@ -479,6 +503,12 @@ void conv2d_transposed(Tensor input, Tensor filter, Tensor bias, Tensor &output)
       }
     }
   }
+  */
+  Tensor reshaped_input;
+  im2col_tr(input, R, S, reshaped_input);
+  shift(output, bias);
+  reshape_filter(filter);
+  matmul(reshaped_input, filter, output, OH * OW, K, R * S * C);
   conv2d_tr_t += (get_time() - start);
 }
 
