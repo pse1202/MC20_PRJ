@@ -57,6 +57,8 @@ void pix2pix_init() {
    */
 }
 
+static size_t img_idx = 0;
+
 void pix2pix(uint8_t *input_buf, float *weight_buf, uint8_t *output_buf, size_t num_image) {
   /*
    * !!!!!!!! Caution !!!!!!!!
@@ -82,7 +84,7 @@ void pix2pix(uint8_t *input_buf, float *weight_buf, uint8_t *output_buf, size_t 
   Tensor decoder_layer_convolved[9];
   Tensor decoder_layer[9];
 
-  for (size_t img_idx = 0; img_idx < num_image; ++img_idx) {
+  for (img_idx = 0; img_idx < num_image; ++img_idx) {
     // Pick 1 image out of num_image
     get_one_image(input, one_image, img_idx);
 
@@ -473,7 +475,7 @@ void conv2d_transposed(Tensor input, Tensor filter, Tensor bias, Tensor &output)
   Tensor reshaped_input;
   im2col_tr(input, R, S, reshaped_input);
   shift(output, bias);
-  reshape_filter(filter);
+  if (img_idx == 0) reshape_filter(filter);
   matmul(reshaped_input, filter, output, OH * OW, K, R * S * C);
   conv2d_tr_t += (get_time() - start);
 }
