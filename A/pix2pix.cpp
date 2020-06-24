@@ -347,89 +347,19 @@ static void* mat_mul_thread(void *data) {
   return NULL;
 }
 
-// const size_t block_size = 48;
-const size_t kern_size = 4;
-
 void matmul(Tensor A, Tensor B, Tensor C, size_t M, size_t N, size_t K) {
-//  printf("MATMUL: M: %d, N: %d, K: %d\n", M, N, K);
+  // printf("MATMUL: M: %d, N: %d, K: %d\n", M, N, K);
   double start = get_time();
   assert(A.sz == (M * K));
   assert(B.sz == (K * N));
-  assert(C.sz == (M * N));
-  size_t block_size = 8;
- 
+  assert(C.sz == (M * N)); 
   // default matmul
-  if (M == 1 || N == 1) {
-    for (size_t m = 0; m < M; m++)
-      for (size_t k = 0; k < K; k++)
-        for (size_t n = 0; n < N; n++)
-          C.buf[m * N + n] += A.buf[m * K + k] * B.buf[k * N + n];
-  } else {  
- 
-    for (size_t mb = 0; mb < M; mb += block_size) {
-    size_t block = (M - mb) > block_size ? block_size : M - mb;
-      for (size_t k = 0; k < K; k++) {
-        for (size_t m = mb; m < mb + block; m++) {
-          for (size_t n = 0; n < N; n++)
-            C.buf[m * N + n] += A.buf[m * K + k] * B.buf[k * N + n];
-      }
-    }
-  }
   
-  /*
-  float B_block[block_size * block_size];
-  float A_block[block_size * block_size];
-  float tmp[kern_size * kern_size];
+  for (size_t m = 0; m < M; m++)
+    for (size_t k = 0; k < K; k++)
+      for (size_t n = 0; n < N; n++)
+        C.buf[m * N + n] += A.buf[m * K + k] * B.buf[k * N + n];
 
-  for (size_t nc = 0; nc < N; nc += block_size) {
-    size_t n_size = std::min(block_size, N - nc);
-    for (size_t kc = 0; kc < K; kc += block_size) {
-      size_t k_size = std::min(block_size, K - kc);
-      // copy b block
-      for (auto bb = 0; bb < k_size; bb++)
-        memcpy(&B_block[bb * block_size], &B.buf[kc * N + nc], sizeof(float) * n_size);
-      for (size_t mc = 0; mc < M; mc += block_size) {
-        size_t m_size = std::min(block_size, M - mc);
-      // copy a block
-        for (auto ab = 0; ab < m_size; ab++)
-          memcpy(&A_block[ab * block_size], &A.buf[mc * K + kc], sizeof(float) * k_size);
-        for (size_t n = 0; n < n_size; n += kern_size) {
-          size_t n_ker = std::min(kern_size, n_size - n);
-          for (size_t m = 0; m < m_size; m += kern_size) {
-            size_t m_ker = std::min(kern_size, m_size - m);
-            for (auto t = 0; t < m_ker; t++)
-              memcpy(&tmp[kern_size * t], &C.buf[(mc + t) * N + nc + n], sizeof(float) * n_ker);
-            for (size_t k = 0; k < k_size; k++) {
-              for (auto i = 0; i < m_ker; i++)
-                for (auto j = 0; j < n_ker; j++)
-                  tmp[i * kern_size + j] += B_block[k * block_size + j + (n - nc)] * A_block[(i + (m - mc)) * block_size + k];
-            }
-            for (auto t = 0; t < m_ker; t++)
-              memcpy(&C.buf[(mc + t) * N + nc + n], &tmp[kern_size * t], sizeof(float) * n_ker);
-          }
-        }
-      }
-    }
-  }
-    */   
-  /*
-  long ranges[num_threads];
-  int left = 0, right;
-  for (int i = 0; i < num_threads; i++){
-    right = left + (M / num_threads) + (M % num_threads > i);
-    ranges[i] = ((long) left << 32) | ((long) right & 0xFFFFFFFFL);
-    left = right;
-  }
-  _A = A.buf, _B = B.buf, _C = C.buf;
-  _M = M, _N = N, _K = K;
-  pthread_t threads[num_threads];
-  for (int i = 0; i < num_threads; i++)
-    pthread_create(&threads[i], NULL, mat_mul_thread, &ranges[i]);
-  
-  for (int i = 0; i < num_threads; i++)
-    pthread_join(threads[i], NULL);
-  */
-  }
   matmul_t += (get_time() - start);
 }
 
