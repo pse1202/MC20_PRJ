@@ -347,21 +347,34 @@ static void* mat_mul_thread(void *data) {
   return NULL;
 }
 
-const size_t block_size = 48;
+// const size_t block_size = 48;
 const size_t kern_size = 4;
 
 void matmul(Tensor A, Tensor B, Tensor C, size_t M, size_t N, size_t K) {
+//  printf("MATMUL: M: %d, N: %d, K: %d\n", M, N, K);
   double start = get_time();
   assert(A.sz == (M * K));
   assert(B.sz == (K * N));
   assert(C.sz == (M * N));
-  
+  size_t block_size = 8;
+ 
   // default matmul
-   
-  for (size_t m = 0; m < M; m++)
-    for (size_t k = 0; k < K; k++)
-      for (size_t n = 0; n < N; n++)
-        C.buf[m * N + n] += A.buf[m * K + k] * B.buf[k * N + n];
+  if (M == 1 || N == 1) {
+    for (size_t m = 0; m < M; m++)
+      for (size_t k = 0; k < K; k++)
+        for (size_t n = 0; n < N; n++)
+          C.buf[m * N + n] += A.buf[m * K + k] * B.buf[k * N + n];
+  } else {  
+ 
+    for (size_t mb = 0; mb < M; mb += block_size) {
+    size_t block = (M - mb) > block_size ? block_size : M - mb;
+      for (size_t k = 0; k < K; k++) {
+        for (size_t m = mb; m < mb + block; m++) {
+          for (size_t n = 0; n < N; n++)
+            C.buf[m * N + n] += A.buf[m * K + k] * B.buf[k * N + n];
+      }
+    }
+  }
   
   /*
   float B_block[block_size * block_size];
@@ -416,6 +429,7 @@ void matmul(Tensor A, Tensor B, Tensor C, size_t M, size_t N, size_t K) {
   for (int i = 0; i < num_threads; i++)
     pthread_join(threads[i], NULL);
   */
+  }
   matmul_t += (get_time() - start);
 }
 
