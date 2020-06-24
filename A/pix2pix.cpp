@@ -7,8 +7,10 @@
 #include <cmath>
 #include <cassert>
 #include <cstring>
+#include <algorithm>
 #include <stdio.h>
 #include <pthread.h>
+#include <omp.h>
 
 class Tensor {
 public:
@@ -44,6 +46,7 @@ static void relu(Tensor input, Tensor &output);
 static void batchnorm(Tensor input, Tensor scale, Tensor offset, Tensor &output);
 static void concat(Tensor input0, Tensor input1, Tensor &output);
 static void elem_tanh(Tensor input, Tensor &output);
+static void reshape_filter(Tensor input);
 
 // Profilers
 static double conv2d_t = 0, conv2d_tr_t = 0, leaky_relu_t = 0, relu_t = 0, batchnorm_t = 0, concat_t = 0, tanh_t = 0;
@@ -56,8 +59,6 @@ void pix2pix_init() {
    * Execution time of this function is not measured, so do as much as possible!
    */
 }
-
-static size_t img_idx = 0;
 
 void pix2pix(uint8_t *input_buf, float *weight_buf, uint8_t *output_buf, size_t num_image) {
   /*
@@ -83,8 +84,16 @@ void pix2pix(uint8_t *input_buf, float *weight_buf, uint8_t *output_buf, size_t 
   Tensor decoder_layer_rectified[9];
   Tensor decoder_layer_convolved[9];
   Tensor decoder_layer[9];
-
-  for (img_idx = 0; img_idx < num_image; ++img_idx) {
+  
+  // reshape filters
+  for (int i = 8; i >= 1; --i) {
+    auto filter = weights["generator/decoder_" + std::to_string(i) + "/conv2d_transpose/kernel"];
+    reshape_filter(filter);
+  }
+  
+  #pragma omp parallel for private(one_image, encoder_layer_input, encoder_layer_rectified, encoder_layer_convolved, encoder_layer, \
+  decoder_layer_input, decoder_layer_rectified, decoder_layer_convolved, decoder_layer)
+  for (size_t img_idx = 0; img_idx < num_image; ++img_idx) {
     // Pick 1 image out of num_image
     get_one_image(input, one_image, img_idx);
 
@@ -338,12 +347,59 @@ static void* mat_mul_thread(void *data) {
   return NULL;
 }
 
+const size_t block_size = 48;
+const size_t kern_size = 4;
+
 void matmul(Tensor A, Tensor B, Tensor C, size_t M, size_t N, size_t K) {
   double start = get_time();
   assert(A.sz == (M * K));
   assert(B.sz == (K * N));
   assert(C.sz == (M * N));
   
+  // default matmul
+   
+  for (size_t m = 0; m < M; m++)
+    for (size_t k = 0; k < K; k++)
+      for (size_t n = 0; n < N; n++)
+        C.buf[m * N + n] += A.buf[m * K + k] * B.buf[k * N + n];
+  
+  /*
+  float B_block[block_size * block_size];
+  float A_block[block_size * block_size];
+  float tmp[kern_size * kern_size];
+
+  for (size_t nc = 0; nc < N; nc += block_size) {
+    size_t n_size = std::min(block_size, N - nc);
+    for (size_t kc = 0; kc < K; kc += block_size) {
+      size_t k_size = std::min(block_size, K - kc);
+      // copy b block
+      for (auto bb = 0; bb < k_size; bb++)
+        memcpy(&B_block[bb * block_size], &B.buf[kc * N + nc], sizeof(float) * n_size);
+      for (size_t mc = 0; mc < M; mc += block_size) {
+        size_t m_size = std::min(block_size, M - mc);
+      // copy a block
+        for (auto ab = 0; ab < m_size; ab++)
+          memcpy(&A_block[ab * block_size], &A.buf[mc * K + kc], sizeof(float) * k_size);
+        for (size_t n = 0; n < n_size; n += kern_size) {
+          size_t n_ker = std::min(kern_size, n_size - n);
+          for (size_t m = 0; m < m_size; m += kern_size) {
+            size_t m_ker = std::min(kern_size, m_size - m);
+            for (auto t = 0; t < m_ker; t++)
+              memcpy(&tmp[kern_size * t], &C.buf[(mc + t) * N + nc + n], sizeof(float) * n_ker);
+            for (size_t k = 0; k < k_size; k++) {
+              for (auto i = 0; i < m_ker; i++)
+                for (auto j = 0; j < n_ker; j++)
+                  tmp[i * kern_size + j] += B_block[k * block_size + j + (n - nc)] * A_block[(i + (m - mc)) * block_size + k];
+            }
+            for (auto t = 0; t < m_ker; t++)
+              memcpy(&C.buf[(mc + t) * N + nc + n], &tmp[kern_size * t], sizeof(float) * n_ker);
+          }
+        }
+      }
+    }
+  }
+    */   
+  /*
   long ranges[num_threads];
   int left = 0, right;
   for (int i = 0; i < num_threads; i++){
@@ -359,6 +415,7 @@ void matmul(Tensor A, Tensor B, Tensor C, size_t M, size_t N, size_t K) {
   
   for (int i = 0; i < num_threads; i++)
     pthread_join(threads[i], NULL);
+  */
   matmul_t += (get_time() - start);
 }
 
@@ -475,7 +532,7 @@ void conv2d_transposed(Tensor input, Tensor filter, Tensor bias, Tensor &output)
   Tensor reshaped_input;
   im2col_tr(input, R, S, reshaped_input);
   shift(output, bias);
-  if (img_idx == 0) reshape_filter(filter);
+  // if (img_idx == 0) reshape_filter(filter);
   matmul(reshaped_input, filter, output, OH * OW, K, R * S * C);
   conv2d_tr_t += (get_time() - start);
 }

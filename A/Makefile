@@ -2,7 +2,7 @@ TARGET=main
 OBJECTS=util.o pix2pix.o
 
 CXX=g++
-CXXFLAGS=-std=c++11 -Wall -mavx -O3
+CXXFLAGS=-std=c++11 -Wall -mavx -fopenmp -O3
 LDFLAGS=-lm -pthread
 # If you use MPI, use the following lines instead of above lines
 #CXX=mpic++
