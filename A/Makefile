@@ -1,5 +1,5 @@
 TARGET=main
-OBJECTS=util.o pix2pix.o
+OBJECTS=util.o pix2pix.o matmul.o
 
 CXX=g++
 CXXFLAGS=-std=c++11 -Wall -mavx -fopenmp -O3

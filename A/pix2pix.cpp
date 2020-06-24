@@ -1,6 +1,6 @@
 #include "pix2pix.h"
-
 #include "util.h"
+#include "matmul.h"
 
 #include <string>
 #include <map>
@@ -325,28 +325,6 @@ void get_one_image(Tensor input, Tensor &output, size_t idx) {
   }
 }
 
-static float *_A, *_B, *_C;
-static int  _M, _N, _K;
-static int num_threads = 32, max_block = 16;
-
-static void* mat_mul_thread(void *data) {
-  long l = *((long *)  data);
-  int lrange = (int) (l >> 32);
-  int rrange = (int) l;
-  while (lrange < rrange) {
-    int block_size = rrange - lrange > max_block ? max_block : rrange - lrange;
-    for (int k = 0; k < _K; ++k) {
-      for (int i = lrange; i < lrange + block_size; i++){
-        for (int j = 0; j < _N; j++){
-          _C[i * _N + j] += _A[i * _K + k] * _B[k * _N + j];
-        }
-      }
-    }
-    lrange += block_size;
-  }
-  return NULL;
-}
-
 void matmul(Tensor A, Tensor B, Tensor C, size_t M, size_t N, size_t K) {
   // printf("MATMUL: M: %d, N: %d, K: %d\n", M, N, K);
   double start = get_time();
@@ -354,12 +332,7 @@ void matmul(Tensor A, Tensor B, Tensor C, size_t M, size_t N, size_t K) {
   assert(B.sz == (K * N));
   assert(C.sz == (M * N)); 
   // default matmul
-  
-  for (size_t m = 0; m < M; m++)
-    for (size_t k = 0; k < K; k++)
-      for (size_t n = 0; n < N; n++)
-        C.buf[m * N + n] += A.buf[m * K + k] * B.buf[k * N + n];
-
+  mat_mul(A.buf, B.buf, C.buf, M, N, K);
   matmul_t += (get_time() - start);
 }
 
