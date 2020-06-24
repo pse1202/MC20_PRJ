@@ -1,10 +1,16 @@
 #include "pix2pix.h"
-
 #include "util.h"
+#include "matmul.h"
 
 #include <string>
 #include <map>
 #include <cmath>
+#include <cassert>
+#include <cstring>
+#include <algorithm>
+#include <stdio.h>
+#include <pthread.h>
+#include <omp.h>
 
 class Tensor {
 public:
@@ -40,6 +46,11 @@ static void relu(Tensor input, Tensor &output);
 static void batchnorm(Tensor input, Tensor scale, Tensor offset, Tensor &output);
 static void concat(Tensor input0, Tensor input1, Tensor &output);
 static void elem_tanh(Tensor input, Tensor &output);
+static void reshape_filter(Tensor input);
+
+// Profilers
+static double conv2d_t = 0, conv2d_tr_t = 0, leaky_relu_t = 0, relu_t = 0, batchnorm_t = 0, concat_t = 0, tanh_t = 0;
+static double im2col_t = 0, shift_t = 0, reshape_t = 0, matmul_t = 0;
 
 void pix2pix_init() {
   /*
@@ -73,7 +84,15 @@ void pix2pix(uint8_t *input_buf, float *weight_buf, uint8_t *output_buf, size_t 
   Tensor decoder_layer_rectified[9];
   Tensor decoder_layer_convolved[9];
   Tensor decoder_layer[9];
-
+  
+  // reshape filters
+  for (int i = 8; i >= 1; --i) {
+    auto filter = weights["generator/decoder_" + std::to_string(i) + "/conv2d_transpose/kernel"];
+    reshape_filter(filter);
+  }
+  
+  #pragma omp parallel for private(one_image, encoder_layer_input, encoder_layer_rectified, encoder_layer_convolved, encoder_layer, \
+  decoder_layer_input, decoder_layer_rectified, decoder_layer_convolved, decoder_layer)
   for (size_t img_idx = 0; img_idx < num_image; ++img_idx) {
     // Pick 1 image out of num_image
     get_one_image(input, one_image, img_idx);
@@ -132,6 +151,20 @@ void pix2pix(uint8_t *input_buf, float *weight_buf, uint8_t *output_buf, size_t 
     // Put a image into output buffer
     postprocess_one_image(decoder_layer[1], output_buf, img_idx);
   }
+
+  printf("Conv2D: %f\n", conv2d_t);
+  printf("Conv2D Transpose: %f\n", conv2d_tr_t);
+  printf("LeakyRelu: %f\n", leaky_relu_t);
+  printf("Relu: %f\n", relu_t);
+  printf("BatchNorm: %f\n", batchnorm_t);
+  printf("Concat: %f\n", concat_t);
+  printf("Tanh: %f\n", tanh_t);
+  
+  printf("========\n");
+  printf("Im2col: %f\n", im2col_t);
+  printf("Shift: %f\n", shift_t);
+  printf("Reshape: %f\n", reshape_t);
+  printf("Matmul: %f\n", matmul_t);
 }
 
 Tensor::Tensor() : buf(NULL) {}
@@ -292,8 +325,55 @@ void get_one_image(Tensor input, Tensor &output, size_t idx) {
   }
 }
 
+void matmul(Tensor A, Tensor B, Tensor C, size_t M, size_t N, size_t K) {
+  // printf("MATMUL: M: %d, N: %d, K: %d\n", M, N, K);
+  double start = get_time();
+  assert(A.sz == (M * K));
+  assert(B.sz == (K * N));
+  assert(C.sz == (M * N)); 
+  // default matmul
+  mat_mul(A.buf, B.buf, C.buf, M, N, K);
+  matmul_t += (get_time() - start);
+}
+
+// stride = 2, pad = 1
+void im2col(Tensor input, size_t filter_height, size_t filter_width, Tensor &output) {
+  double start = get_time();
+  size_t H = input.shape[0], W = input.shape[1], C = input.shape[2];
+  size_t OH = H / 2, OW = W / 2, R = filter_height, S = filter_width;
+  output.alloc_once({OH, OW, R, S, C});
+  for (size_t oh = 0; oh < OH; oh++) {
+    for (size_t ow = 0; ow < OW; ow++) {
+      for (size_t r = 0; r < R; r++) {
+        for (size_t s = 0; s < S; s++) {
+          size_t ih = oh * 2 - 1 + r;
+          size_t iw = ow * 2 - 1 + s;
+          if (ih < 0 || ih >= H || iw < 0 || iw >= W) continue;
+          for (size_t c = 0; c < C; c++) {
+            output.buf[(oh * OW + ow) * (R * S * C) + (r * S * C + s * C + c)] = input.buf[ih * W * C + iw * C + c];
+          }
+        }
+      }
+    }
+  }
+  im2col_t += (get_time() - start);
+}
+
+// shift bias
+void shift(Tensor input, Tensor bias) {
+  double start = get_time();
+  assert(bias.shape[0] == bias.sz);
+  size_t K = bias.sz;
+  for (size_t i = 0; i < input.sz; i++) {
+    input.buf[i] = bias.buf[i % K];
+  }
+  shift_t += (get_time() - start);
+}
+
 // Convolution (2-dimension, stride = 2, pad = 1)
+// filter_height = filter_width = 4
 void conv2d(Tensor input, Tensor filter, Tensor bias, Tensor &output) {
+  double start = get_time();
   // input shape = (in_height, in_width, in_channels)
   // filter shape = (filter_height, filter_width, in_channels, output_channels)
   // bias shape = (output_channels)
@@ -302,35 +382,59 @@ void conv2d(Tensor input, Tensor filter, Tensor bias, Tensor &output) {
   size_t R = filter.shape[0], S = filter.shape[1], K = filter.shape[3];
   const size_t stride = 2, pad = 1;
   size_t OH = H / stride, OW = W / stride;
-  output.alloc_once({OH, OW, K});
 
-  for (size_t k = 0; k < K; ++k) {
-    for (size_t oh = 0; oh < OH; ++oh) {
-      for (size_t ow = 0; ow < OW; ++ow) {
-        float x = bias.buf[k];
-        for (size_t c = 0; c < C; ++c) {
-          for (size_t r = 0; r < R; ++r) {
-            for (size_t s = 0; s < S; ++s) {
-              // input (oh * stride - pad + r, ow * stride - pad + s, c)
-              size_t ih = oh * stride - pad + r;
-              size_t iw = ow * stride - pad + s;
-              if (ih < 0 || ih >= H || iw < 0 || iw >= W) continue;
-              float ii = input.buf[ih * W * C + iw * C + c];
-              // filter (r, s, c, k)
-              float ff = filter.buf[r * S * C * K + s * C * K + c * K + k];
-              x += ii * ff;
-            }
+  output.alloc_once({OH, OW, K});
+  Tensor reshaped_input;
+  im2col(input, R, S, reshaped_input);
+  shift(output, bias);
+  matmul(reshaped_input, filter, output, OH * OW, K, R * S * C);
+  conv2d_t += (get_time() - start);
+}
+
+void im2col_tr(Tensor input, size_t filter_height, size_t filter_width, Tensor &output) {
+  double start = get_time();
+  size_t H = input.shape[0], W = input.shape[1], C = input.shape[2];
+  size_t OH = H * 2, OW = W * 2, R = filter_height, S = filter_width;
+  output.alloc_once({OH, OW, R, S, C});
+  for (size_t oh = 0; oh < OH; oh++) {
+    for (size_t ow = 0; ow < OW; ow++) {
+      for (size_t r = 0; r < R; r++) {
+        for (size_t s = 0; s < S; s++) {
+          size_t raw_h = (oh - r + 1), raw_w = (ow - s + 1);
+          if (raw_h % 2 != 0 || raw_w % 2 != 0) continue;
+          size_t ih = raw_h / 2, iw = raw_w / 2;
+          if (ih < 0 || ih >= H || iw < 0 || iw >= W) continue;
+          for (size_t c = 0; c < C; c++) {
+            output.buf[(oh * OW + ow) * (R * S * C) + (r * S * C + s * C + c)] = input.buf[ih * W * C + iw * C + c];
           }
         }
-        // output (oh, ow, k)
-        output.buf[oh * OW * K + ow * K + k] = x;
       }
     }
   }
+  im2col_t += (get_time() - start);
 }
+
+void reshape_filter(Tensor input) {
+  double start = get_time();
+  size_t R = input.shape[0], S = input.shape[1], K = input.shape[2], C = input.shape[3];
+  float *tmp = (float*) malloc(K*C*sizeof(float));
+  for (size_t r = 0; r < R; r++) {
+    for (size_t s = 0; s < S; s++) {
+      for (size_t k = 0; k < K; k++) {
+        for (size_t c = 0; c < C; c++) {
+          tmp[K * c + k] = input.buf[(r * S + s) * K * C + (k * C + c)];
+        }
+      }
+      memcpy(&input.buf[(r * S + s) * K * C], tmp, K * C * sizeof(float));
+    }
+  }
+  reshape_t += (get_time() - start);
+}
+
 
 // Transposed convolution (2-dimension, stride = 2, pad = 1)
 void conv2d_transposed(Tensor input, Tensor filter, Tensor bias, Tensor &output) {
+  double start = get_time();
   // input shape = (in_height, in_width, in_channels)
   // filter shape = (filter_height, filter_width, output_channels, in_channels)
   // bias shape = (output_channels)
@@ -340,37 +444,19 @@ void conv2d_transposed(Tensor input, Tensor filter, Tensor bias, Tensor &output)
   // assume stride 2, pad 1
   const size_t stride = 2, pad = 1;
   size_t OH = H * stride, OW = W * stride;
-  output.alloc_once({OH, OW, K});
 
-  for (size_t k = 0; k < K; ++k) {
-    for (size_t oh = 0; oh < OH; ++oh) {
-      for (size_t ow = 0; ow < OW; ++ow) {
-        float x = bias.buf[k];
-        for (size_t c = 0; c < C; ++c) {
-          for (size_t r = 0; r < R; ++r) {
-            for (size_t s = 0; s < S; ++s) {
-              // input ((oh - r + pad) / stride, (ow - s + pad) / stride, c)
-              //   where (oh - r + pad) % stride == 0 && (ow - s + pad) % stride == 0
-              if ((oh - r + pad) % stride != 0 || (ow - s + pad) % stride != 0) continue;
-              size_t ih = (oh - r + pad) / stride;
-              size_t iw = (ow - s + pad) / stride;
-              if (ih < 0 || ih >= H || iw < 0 || iw >= W) continue;
-              float ii = input.buf[ih * W * C + iw * C + c];
-              // filter (r, s, k, c)
-              float ff = filter.buf[r * S * K * C + s * K * C + k * C + c];
-              x += ii * ff;
-            }
-          }
-        }
-        // output (oh, ow, k)
-        output.buf[oh * OW * K + ow * K + k] = x;
-      }
-    }
-  }
+  output.alloc_once({OH, OW, K});
+  Tensor reshaped_input;
+  im2col_tr(input, R, S, reshaped_input);
+  shift(output, bias);
+  // if (img_idx == 0) reshape_filter(filter);
+  matmul(reshaped_input, filter, output, OH * OW, K, R * S * C);
+  conv2d_tr_t += (get_time() - start);
 }
 
 // Leaky ReLU
 void leaky_relu(Tensor input, Tensor &output, float alpha) {
+  double start = get_time();
   // input shape = (height, width, channels)
   // output shape = (height, width, channels)
   size_t H = input.shape[0], W = input.shape[1], C = input.shape[2];
@@ -378,10 +464,12 @@ void leaky_relu(Tensor input, Tensor &output, float alpha) {
   for (size_t i = 0; i < H * W * C; ++i) {
     output.buf[i] = input.buf[i] >= 0 ? input.buf[i] : alpha * input.buf[i];
   }
+  leaky_relu_t += (get_time() - start);
 }
 
 // ReLU
 void relu(Tensor input, Tensor &output) {
+  double start = get_time();
   // input shape = (height, width, channels)
   // output shape = (height, width, channels)
   size_t H = input.shape[0], W = input.shape[1], C = input.shape[2];
@@ -389,10 +477,12 @@ void relu(Tensor input, Tensor &output) {
   for (size_t i = 0; i < H * W * C; ++i) {
     output.buf[i] = input.buf[i] >= 0 ? input.buf[i] : 0;
   }
+  relu_t += (get_time() - start);
 }
 
 // Batch normalization (channel-wise)
 void batchnorm(Tensor input, Tensor scale, Tensor offset, Tensor &output) {
+  double start = get_time();
   // input shape = (height, width, channels)
   // scale shape = (channels)
   // offset shape = (channels)
@@ -426,10 +516,12 @@ void batchnorm(Tensor input, Tensor scale, Tensor offset, Tensor &output) {
       }
     }
   }
+  batchnorm_t += (get_time() - start);
 }
 
 // Concatenation (along channel dimension)
 void concat(Tensor input0, Tensor input1, Tensor &output) {
+  double start = get_time();
   // input0 shape = (height, width, channels0)
   // input1 shape = (height, width, channels1)
   // output shape = (height, width, channels0 + channels1)
@@ -446,10 +538,12 @@ void concat(Tensor input0, Tensor input1, Tensor &output) {
       }
     }
   }
+  concat_t += (get_time() - start);
 }
 
 // Elementwise tanh
 void elem_tanh(Tensor input, Tensor &output) {
+  double start = get_time();
   // input shape = (height, width, channels)
   // output shape = (height, width, channels)
   size_t H = input.shape[0], W = input.shape[1], C = input.shape[2];
@@ -457,4 +551,5 @@ void elem_tanh(Tensor input, Tensor &output) {
   for (size_t i = 0; i < H * W * C; ++i) {
     output.buf[i] = tanhf(input.buf[i]);
   }
+  tanh_t += (get_time() - start);
 }
