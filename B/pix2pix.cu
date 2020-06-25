@@ -79,6 +79,7 @@ void pix2pix_init() {
   
   cudaDeviceGetLimit(&l, cudaLimitMallocHeapSize);
   printf("New Max Heap size: %d\n", l);
+  cudaDeviceSynchronize();
 
 }
 
@@ -430,22 +431,7 @@ void im2col(Tensor input, size_t filter_height, size_t filter_width, Tensor &out
   size_t H = input.shape[0], W = input.shape[1], C = input.shape[2];
   size_t OH = H / 2, OW = W / 2, R = filter_height, S = filter_width;
   output.alloc_once({OH, OW, R, S, C});
-  /*
-  for (size_t oh = 0; oh < OH; oh++) {
-    for (size_t ow = 0; ow < OW; ow++) {
-      for (size_t r = 0; r < R; r++) {
-        for (size_t s = 0; s < S; s++) {
-          int ih = oh * 2 - 1 + r;
-          int iw = ow * 2 - 1 + s;
-          if (ih < 0 || ih >= H || iw < 0 || iw >= W) continue;
-          for (size_t c = 0; c < C; c++) {
-            output.cuda_buf[(oh * OW + ow) * (R * S * C) + (r * S * C + s * C + c)] = input.cuda_buf[ih * W * C + iw * C + c];
-          }
-        }
-      }
-    }
-  }
-  */
+
   dim3 blockDim(1, 1, 1);
   dim3 gridDim(OH * OW, R * S, 1);
   _im2col<<<gridDim, blockDim>>>(input.cuda_buf, output.cuda_buf, OH, OW, R, S, C);
@@ -463,10 +449,6 @@ void shift(Tensor &input, Tensor bias) {
   double start = get_time();
   assert(bias.shape[0] == bias.sz);
   size_t K = bias.sz;
-  /*
-  for (size_t i = 0; i < input.sz; i++) {
-    input.buf[i] = bias.buf[i % K];
-  }*/
   _shift<<<input.sz / K, K>>>(input.cuda_buf, bias.cuda_buf);
   cudaDeviceSynchronize();
   shift_t += (get_time() - start);
@@ -510,22 +492,6 @@ void im2col_tr(Tensor input, size_t filter_height, size_t filter_width, Tensor &
   size_t H = input.shape[0], W = input.shape[1], C = input.shape[2];
   size_t OH = H * 2, OW = W * 2, R = filter_height, S = filter_width;
   output.alloc_once({OH, OW, R, S, C});
-  /*
-  for (size_t oh = 0; oh < OH; oh++) {
-    for (size_t ow = 0; ow < OW; ow++) {
-      for (size_t r = 0; r < R; r++) {
-        for (size_t s = 0; s < S; s++) {
-          size_t raw_h = (oh - r + 1), raw_w = (ow - s + 1);
-          if (raw_h % 2 != 0 || raw_w % 2 != 0) continue;
-          int ih = raw_h / 2, iw = raw_w / 2;
-          if (ih < 0 || ih >= H || iw < 0 || iw >= W) continue;
-          for (size_t c = 0; c < C; c++) {
-            output.buf[(oh * OW + ow) * (R * S * C) + (r * S * C + s * C + c)] = input.buf[ih * W * C + iw * C + c];
-          }
-        }
-      }
-    }
-  }*/
   dim3 blockDim(1, 1, 1);
   dim3 gridDim(OH * OW, R * S, 1);
   _im2col_tr<<<gridDim, blockDim>>>(input.cuda_buf, output.cuda_buf, OH, OW, R, S, C);
@@ -562,15 +528,7 @@ void reshape_filter(Tensor *input) {
       memcpy(&input->buf[(r * S + s) * K * C], tmp, K * C * sizeof(float));
     }
   }
-  /*
-  printf("Reshape total %d elements\n", input->sz);
-  _reshape_filter<<<R, S>>>(input->buf, tmp, K, C, input->sz);
-  //input.free_cuda_buf();
-  r = cudaDeviceSynchronize();
-  if (r != cudaSuccess){
-    printf(cudaGetErrorString(r));
-    printf(", _reshape_filter Fail, %d, size: %d\n", r, input->sz * sizeof(float));
-  } else printf("Reshape Filter OK\n");*/
+
   input->set_cuda_buf();
   reshape_t += (get_time() - start);
 }
@@ -609,10 +567,6 @@ void leaky_relu(Tensor input, Tensor &output, float alpha) {
   // output shape = (height, width, channels)
   size_t H = input.shape[0], W = input.shape[1], C = input.shape[2];
   output.alloc_once({H, W, C});
-  /*
-  for (size_t i = 0; i < H * W * C; ++i) {
-    output.buf[i] = input.buf[i] >= 0 ? input.buf[i] : alpha * input.buf[i];
-  }*/
   _leaky_relu<<<H*W, C>>>(input.cuda_buf, output.cuda_buf, alpha);
   cudaDeviceSynchronize();
   leaky_relu_t += (get_time() - start);
@@ -630,10 +584,6 @@ void relu(Tensor input, Tensor &output) {
   // output shape = (height, width, channels)
   size_t H = input.shape[0], W = input.shape[1], C = input.shape[2];
   output.alloc_once({H, W, C});
-  /*
-  for (size_t i = 0; i < H * W * C; ++i) {
-    output.buf[i] = input.buf[i] >= 0 ? input.buf[i] : 0;
-  }*/
   _relu<<<H*W, C>>>(input.cuda_buf, output.cuda_buf);
   cudaDeviceSynchronize();
   relu_t += (get_time() - start);
@@ -673,34 +623,6 @@ void batchnorm(Tensor input, Tensor scale, Tensor offset, Tensor &output) {
   // output shape = (height, width, channels)
   size_t H = input.shape[0], W = input.shape[1], C = input.shape[2];
   output.alloc_once({H, W, C});
-  /*
-  for (size_t c = 0; c < C; ++c) {
-    float sum = 0;
-    for (size_t h = 0; h < H; ++h) {
-      for (size_t w = 0; w < W; ++w) {
-        float ii = input.buf[h * W * C + w * C + c];
-        sum += ii;
-      }
-    }
-    float mean = sum / (H * W);
-
-    float sqsum = 0;
-    for (size_t h = 0; h < H; ++h) {
-      for (size_t w = 0; w < W; ++w) {
-        float ii = input.buf[h * W * C + w * C + c];
-        sqsum += (ii - mean) * (ii - mean);
-      }
-    }
-    float variance = sqsum / (H * W);
-
-    const float epsilon = 1e-5;
-    for (size_t h = 0; h < H; ++h) {
-      for (size_t w = 0; w < W; ++w) {
-        size_t idx = h * W * C + w * C + c;
-        output.buf[idx] = offset.buf[c] + (input.buf[idx] - mean) * scale.buf[c] / sqrtf(variance + epsilon);
-      }
-    }
-  }*/
   _batchnorm<<<C, 1>>>(input.cuda_buf, scale.cuda_buf, offset.cuda_buf, output.cuda_buf, H, W, C);
   cudaDeviceSynchronize();
   batchnorm_t += (get_time() - start);
@@ -723,17 +645,6 @@ void concat(Tensor input0, Tensor input1, Tensor &output) {
   size_t H = input0.shape[0], W = input0.shape[1], C0 = input0.shape[2];
   size_t C1 = input1.shape[2];
   output.alloc_once({H, W, C0 + C1});
-  /*
-  for (size_t h = 0; h < H; ++h) {
-    for (size_t w = 0; w < W; ++w) {
-      for (size_t c = 0; c < C0; ++c) {
-        output.buf[h * W * (C0 + C1) + w * (C0 + C1) + c] = input0.buf[h * W * C0 + w * C0 + c];
-      }
-      for (size_t c = 0; c < C1; ++c) {
-        output.buf[h * W * (C0 + C1) + w * (C0 + C1) + (C0 + c)] = input1.buf[h * W * C1 + w * C1 + c];
-      }
-    }
-  }*/
   _concat<<<H, W>>>(input0.cuda_buf, input1.cuda_buf, output.cuda_buf, C0, C1);
   cudaDeviceSynchronize();
   concat_t += (get_time() - start);
@@ -751,10 +662,6 @@ void elem_tanh(Tensor input, Tensor &output) {
   // output shape = (height, width, channels)
   size_t H = input.shape[0], W = input.shape[1], C = input.shape[2];
   output.alloc_once({H, W, C});
-  /*
-  for (size_t i = 0; i < H * W * C; ++i) {
-    output.buf[i] = tanhf(input.buf[i]);
-  }*/
   _elem_tanh<<<H * W, C>>>(input.cuda_buf, output.cuda_buf);
   cudaDeviceSynchronize();
   tanh_t += (get_time() - start);
