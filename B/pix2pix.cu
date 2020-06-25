@@ -57,6 +57,8 @@ static void concat(Tensor input0, Tensor input1, Tensor &output);
 static void elem_tanh(Tensor input, Tensor &output);
 static void reshape_filter(Tensor input);
 
+static void matmul(Tensor A, Tensor B, Tensor &C, size_t M, size_t N, size_t K);
+
 // Profilers
 static double conv2d_t = 0, conv2d_tr_t = 0, leaky_relu_t = 0, relu_t = 0, batchnorm_t = 0, concat_t = 0, tanh_t = 0;
 static double im2col_t = 0, shift_t = 0, reshape_t = 0, matmul_t = 0;
@@ -66,13 +68,16 @@ void pix2pix_init() {
    * You can do input-independent and input-size-independent jobs here.
    * e.g., Getting OpenCL platform, Compiling OpenCL kernel, ...
    * Execution time of this function is not measured, so do as much as possible!
-   */
+   */ 
+  size_t l = 0;
+  cudaDeviceGetLimit(&l, cudaLimitMallocHeapSize);
+  printf("Max Heap size: %d\n", l);
+  l = 1048576ull * 2047ull;
+  cudaDeviceSetLimit(cudaLimitMallocHeapSize,  l);
   
-}
+  cudaDeviceGetLimit(&l, cudaLimitMallocHeapSize);
+  printf("New Max Heap size: %d\n", l);
 
-void print5(Tensor t, std::string s) {
-  s += ", %f%f%f%f%f\n";
-  printf(s.c_str(), t.buf[0], t.buf[1], t.buf[2], t.buf[3], t.buf[4]);
 }
 
 void pix2pix(uint8_t *input_buf, float *weight_buf, uint8_t *output_buf, size_t num_image) {
@@ -102,27 +107,29 @@ void pix2pix(uint8_t *input_buf, float *weight_buf, uint8_t *output_buf, size_t 
   
   // reshape filters
   for (int i = 8; i >= 1; --i) {
-    auto decoder = weights["generator/decoder_" + std::to_string(i) + "/conv2d_transpose/kernel"];
-    reshape_filter(decoder);
-    auto encoder = weights["generator/encoder_" + std::to_string(i) + "/conv2d/kernel"];
+    auto decoder = &weights["generator/decoder_" + std::to_string(i) + "/conv2d_transpose/kernel"];
+    reshape_filter(*decoder);
+    auto encoder = &weights["generator/encoder_" + std::to_string(i) + "/conv2d/kernel"];
 
-    float *d_t = (float*)malloc(sizeof(float) * decoder.sz);
-    size_t d_n = decoder.shape[3], d_k = decoder.sz / d_n;
+    float *d_t = (float*)malloc(sizeof(float) * decoder->sz);
+    size_t d_n = decoder->shape[3], d_k = decoder->sz / d_n;
+/*
     for (int j = 0; j < d_k; j++)
       for (int k = 0; k < d_n; k++)
-        d_t[d_k * k + j] = decoder.buf[d_n * j + k];
-    decoder.buf = d_t;
-    decoder.set_cuda_buf();
-
-    float *e_t = (float*)malloc(sizeof(float) * encoder.sz);
-    size_t e_n = encoder.shape[3], e_k = encoder.sz / e_n;
+        d_t[d_k * k + j] = decoder->buf[d_n * j + k];
+    decoder->buf = d_t;*/
+    decoder->set_cuda_buf();
+/*
+    float *e_t = (float*)malloc(sizeof(float) * encoder->sz);
+    size_t e_n = encoder->shape[3], e_k = encoder->sz / e_n;
     for (int j = 0; j < e_k; j++)
       for (int k = 0; k < e_n; k++)
-        e_t[d_k * k + j] = encoder.buf[d_n * j + k];
-    encoder.buf = e_t;
-    encoder.set_cuda_buf();   
+        e_t[d_k * k + j] = encoder->buf[d_n * j + k];
+    encoder->buf = e_t;*/
+    encoder->set_cuda_buf();   
   }
   cudaDeviceSynchronize();
+  printf("Encoder, Decoder malloc done");
   
   for (size_t img_idx = 0; img_idx < num_image; ++img_idx) {
     // Pick 1 image out of num_image
@@ -133,11 +140,10 @@ void pix2pix(uint8_t *input_buf, float *weight_buf, uint8_t *output_buf, size_t 
      */
 
     // Encoder 1 : conv
-    print5(one_image, "image");
+
     auto filter = weights["generator/encoder_1/conv2d/kernel"];
     auto bias = weights["generator/encoder_1/conv2d/bias"];
     conv2d(one_image, filter, bias, encoder_layer[1]);
-    print5(encoder_layer[1], "e1");
 
     for (int i = 2; i <= 8; ++i) {
       // Encoder i : leaky_relu => conv2d => batchnorm
@@ -228,19 +234,32 @@ void Tensor::set_sz() {
 
 void Tensor::set_cuda_buf() {
   init_cuda_buf();
-  cudaMemcpy(cuda_buf, buf, sz * sizeof(float), cudaMemcpyHostToDevice);
+  cudaError_t r = cudaMemcpy(cuda_buf, buf, sz * sizeof(float), cudaMemcpyHostToDevice);
+  if (r != cudaSuccess) {
+    printf(cudaGetErrorString(r));
+    printf(", SetCudaBuf error, %d, size: %d\n", r, sz*sizeof(float));
+  }// else printf("SetCudaBuf OK, size: %d\n", sz*sizeof(float));
 }
 
 void Tensor::init_cuda_buf() {
-  cudaMalloc(&cuda_buf, sz * sizeof(float));
+  cudaError_t r = cudaMalloc(&cuda_buf, sz * sizeof(float));
+  if (r != cudaSuccess){
+    printf(cudaGetErrorString(r));
+    printf(", size: %d\n" , sz * sizeof(float));
+  } //else printf("CudaMalloc OK, size: %d\n", sz * sizeof(float));
 }
 
 void Tensor::free_cuda_buf() {
-  cudaFree(cuda_buf);
+  cudaError_t r = cudaFree(cuda_buf);
+  if (r != cudaSuccess) printf("CudaFree error, %d, size: %d\n", r, sz*sizeof(float));
 }
 
 void Tensor::set_buf_from_cuda() {
-  cudaMemcpy(buf, cuda_buf, sz * sizeof(float), cudaMemcpyDeviceToHost);
+  cudaError_t r = cudaMemcpy(buf, cuda_buf, sz * sizeof(float), cudaMemcpyDeviceToHost);
+  if (r != cudaSuccess){
+    printf(cudaGetErrorString(r));
+    printf(", SetBufFromCuda Fail, %d, size: %d\n", r, sz*sizeof(float));
+  }
 }
 
 // Make a new tensor from buffer and put the tensor into map. Advance buffer pointer by size.
@@ -375,21 +394,24 @@ void get_one_image(Tensor input, Tensor &output, size_t idx) {
   }
 } 
 
-void matmul(Tensor A, Tensor B, Tensor C, size_t M, size_t N, size_t K) {
+void matmul(Tensor A, Tensor B, Tensor &C, size_t M, size_t N, size_t K) {
   // printf("MATMUL: M: %d, N: %d, K: %d\n", M, N, K);
   double start = get_time();
   assert(A.sz == (M * K));
   assert(B.sz == (K * N));
-  assert(C.sz == (M * N)); 
+  assert(C.sz == (M * N));
   
+//  printf("%f %f %f %d %d %d\n", C.buf[0], C.buf[1], C.buf[2], M, N, K);
   A.set_cuda_buf();
   C.set_cuda_buf();
   cudaDeviceSynchronize();
   mat_mul(A.cuda_buf, B.cuda_buf, C.cuda_buf, M, N, K);
   C.set_buf_from_cuda();
+  cudaDeviceSynchronize();
   A.free_cuda_buf();
   C.free_cuda_buf();
   cudaDeviceSynchronize();
+//  printf("%f %f %f %d %d %d\n", C.buf[0], C.buf[1], C.buf[2], M, N, K);
   matmul_t += (get_time() - start);
 }
 
@@ -403,8 +425,8 @@ void im2col(Tensor input, size_t filter_height, size_t filter_width, Tensor &out
     for (size_t ow = 0; ow < OW; ow++) {
       for (size_t r = 0; r < R; r++) {
         for (size_t s = 0; s < S; s++) {
-          size_t ih = oh * 2 - 1 + r;
-          size_t iw = ow * 2 - 1 + s;
+          int ih = oh * 2 - 1 + r;
+          int iw = ow * 2 - 1 + s;
           if (ih < 0 || ih >= H || iw < 0 || iw >= W) continue;
           for (size_t c = 0; c < C; c++) {
             output.buf[(oh * OW + ow) * (R * S * C) + (r * S * C + s * C + c)] = input.buf[ih * W * C + iw * C + c];
@@ -459,7 +481,7 @@ void im2col_tr(Tensor input, size_t filter_height, size_t filter_width, Tensor &
         for (size_t s = 0; s < S; s++) {
           size_t raw_h = (oh - r + 1), raw_w = (ow - s + 1);
           if (raw_h % 2 != 0 || raw_w % 2 != 0) continue;
-          size_t ih = raw_h / 2, iw = raw_w / 2;
+          int ih = raw_h / 2, iw = raw_w / 2;
           if (ih < 0 || ih >= H || iw < 0 || iw >= W) continue;
           for (size_t c = 0; c < C; c++) {
             output.buf[(oh * OW + ow) * (R * S * C) + (r * S * C + s * C + c)] = input.buf[ih * W * C + iw * C + c];

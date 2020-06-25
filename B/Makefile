@@ -4,7 +4,7 @@ OBJECTS=util.o pix2pix.o matmul.o
 CXX=g++
 CXXFLAGS=-std=c++11 -Wall -mavx -O3
 LDFLAGS=-lm -L/usr/local/cuda/lib64 -lcudart
-NVFLAGS=-std=c++11 -arch sm_61 -O3
+NVFLAGS=-std=c++11 -O3 -arch sm_61
 
 # If you use MPI, use the following lines instead of above lines
 #CXX=mpic++
