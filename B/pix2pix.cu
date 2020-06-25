@@ -20,17 +20,19 @@ public:
   Tensor();
   Tensor(float *buf_, std::vector<size_t> shape_);
   void alloc_once(std::vector<size_t> shape_);
+  void alloc_on_host(std::vector<size_t> shape_);
   void set_sz();
   void set_cuda_buf();
   void init_cuda_buf();
   void set_buf_from_cuda();
   void free_cuda_buf();
+  void set_cuda_buf(float *b);
 
   // For real world application, one should use smart pointer to prevent possible memory leak.
   // However, we just use raw pointer for simplicity. Memory will be freed anyway when process exits.
   float* buf;
-   
   float* cuda_buf;
+  bool gpu = false;
 
   // Shape of tensor, from outermost dimension to innermost dimension.
   // e.g., [[1, 2, 3], [4, 5, 6]] => shape = [2, 3]
@@ -48,16 +50,16 @@ static void postprocess_one_image(Tensor input, uint8_t *out, size_t idx);
 static void get_one_image(Tensor input, Tensor &output, size_t idx);
 
 // Operators
-static void conv2d(Tensor input, Tensor filter, Tensor bias, Tensor &output);
-static void conv2d_transposed(Tensor input, Tensor filter, Tensor bias, Tensor &output);
+static void conv2d(Tensor input, Tensor filter, Tensor bias, Tensor &output, Tensor &reshaped_input);
+static void conv2d_transposed(Tensor input, Tensor filter, Tensor bias, Tensor &output, Tensor &reshaped_input);
 static void leaky_relu(Tensor input, Tensor &output, float alpha);
 static void relu(Tensor input, Tensor &output);
 static void batchnorm(Tensor input, Tensor scale, Tensor offset, Tensor &output);
 static void concat(Tensor input0, Tensor input1, Tensor &output);
 static void elem_tanh(Tensor input, Tensor &output);
-static void reshape_filter(Tensor &input);
+static void reshape_filter(Tensor *input);
 
-static void matmul(Tensor &A, Tensor B, Tensor &C, size_t M, size_t N, size_t K);
+static void matmul(Tensor A, Tensor B, Tensor &C, size_t M, size_t N, size_t K);
 
 // Profilers
 static double conv2d_t = 0, conv2d_tr_t = 0, leaky_relu_t = 0, relu_t = 0, batchnorm_t = 0, concat_t = 0, tanh_t = 0;
@@ -95,37 +97,26 @@ void pix2pix(uint8_t *input_buf, float *weight_buf, uint8_t *output_buf, size_t 
 
   // Declare feature maps
   // Memory for feature maps are allocated when they are written first time using Tensor::alloc_once(...)
-/*  Tensor one_image;
+  Tensor one_image;
   Tensor encoder_layer_input[9];
   Tensor encoder_layer_rectified[9];
+  Tensor encoder_layer_reshaped[9];
   Tensor encoder_layer_convolved[9];
   Tensor encoder_layer[9];
   Tensor decoder_layer_input[9];
   Tensor decoder_layer_rectified[9];
+  Tensor decoder_layer_reshaped[9];
   Tensor decoder_layer_convolved[9];
-  Tensor decoder_layer[9];*/
+  Tensor decoder_layer[9];
   
   // reshape filters
   for (int i = 8; i >= 1; --i) {
     auto decoder = &weights["generator/decoder_" + std::to_string(i) + "/conv2d_transpose/kernel"];
-    reshape_filter(*decoder);
-    auto encoder = &weights["generator/encoder_" + std::to_string(i) + "/conv2d/kernel"];
-    decoder->set_cuda_buf();
-    encoder->set_cuda_buf();   
+    reshape_filter(decoder);
   }
   cudaDeviceSynchronize();
-  printf("Encoder, Decoder malloc done\n");
   
   for (size_t img_idx = 0; img_idx < num_image; ++img_idx) {
-  Tensor one_image;
-  Tensor encoder_layer_input[9];
-  Tensor encoder_layer_rectified[9];
-  Tensor encoder_layer_convolved[9];
-  Tensor encoder_layer[9];
-  Tensor decoder_layer_input[9];
-  Tensor decoder_layer_rectified[9];
-  Tensor decoder_layer_convolved[9];
-  Tensor decoder_layer[9];
     // Pick 1 image out of num_image
     get_one_image(input, one_image, img_idx);
 
@@ -137,7 +128,7 @@ void pix2pix(uint8_t *input_buf, float *weight_buf, uint8_t *output_buf, size_t 
 
     auto filter = weights["generator/encoder_1/conv2d/kernel"];
     auto bias = weights["generator/encoder_1/conv2d/bias"];
-    conv2d(one_image, filter, bias, encoder_layer[1]);
+    conv2d(one_image, filter, bias, encoder_layer[1], encoder_layer_reshaped[1]);
 
     for (int i = 2; i <= 8; ++i) {
       // Encoder i : leaky_relu => conv2d => batchnorm
@@ -148,7 +139,7 @@ void pix2pix(uint8_t *input_buf, float *weight_buf, uint8_t *output_buf, size_t 
       auto offset = weights[scope + "/batch_normalization/beta"];
       encoder_layer_input[i] = encoder_layer[i - 1];
       leaky_relu(encoder_layer_input[i], encoder_layer_rectified[i], 0.2);
-      conv2d(encoder_layer_rectified[i], filter, bias, encoder_layer_convolved[i]);
+      conv2d(encoder_layer_rectified[i], filter, bias, encoder_layer_convolved[i], encoder_layer_reshaped[i]);
       batchnorm(encoder_layer_convolved[i], scale, offset, encoder_layer[i]);
     }
 
@@ -171,7 +162,7 @@ void pix2pix(uint8_t *input_buf, float *weight_buf, uint8_t *output_buf, size_t 
         concat(decoder_layer[i + 1], encoder_layer[i], decoder_layer_input[i]);
       }
       relu(decoder_layer_input[i], decoder_layer_rectified[i]);
-      conv2d_transposed(decoder_layer_rectified[i], filter, bias, decoder_layer_convolved[i]);
+      conv2d_transposed(decoder_layer_rectified[i], filter, bias, decoder_layer_convolved[i], decoder_layer_reshaped[i]);
 
       // Last decoder does not have batchnorm
       if (i == 1) break;
@@ -183,6 +174,7 @@ void pix2pix(uint8_t *input_buf, float *weight_buf, uint8_t *output_buf, size_t 
 
     // Put a image into output buffer
     postprocess_one_image(decoder_layer[1], output_buf, img_idx);
+    printf("Image %d done\n", img_idx);
   }
 
   printf("Conv2D: %f\n", conv2d_t);
@@ -200,7 +192,7 @@ void pix2pix(uint8_t *input_buf, float *weight_buf, uint8_t *output_buf, size_t 
   printf("Matmul: %f\n", matmul_t);
 }
 
-Tensor::Tensor() : buf(NULL) {}
+Tensor::Tensor() : buf(NULL){}
 
 // If buf is given, use it. If not, allocate new one.
 Tensor::Tensor(float *buf_, std::vector<size_t> shape_) : buf(buf_), shape(shape_) {
@@ -208,10 +200,19 @@ Tensor::Tensor(float *buf_, std::vector<size_t> shape_) : buf(buf_), shape(shape
   if (buf == NULL) {
     buf = (float*)malloc(sz * sizeof(float));
   }
+  set_cuda_buf();
 }
 
 // If buf is not allocated, allocate new one.
 void Tensor::alloc_once(std::vector<size_t> shape_) {
+  if (!gpu) {
+    shape = shape_;
+    set_sz();
+    init_cuda_buf();
+  }
+}
+
+void Tensor::alloc_on_host(std::vector<size_t> shape_) {
   if (buf == NULL) {
     shape = shape_;
     set_sz();
@@ -235,20 +236,28 @@ void Tensor::set_cuda_buf() {
   }// else printf("SetCudaBuf OK, size: %d\n", sz*sizeof(float));
 }
 
+void Tensor::set_cuda_buf(float *b) {
+  cuda_buf = b;
+}
+
 void Tensor::init_cuda_buf() {
+  if (gpu) return;
+  gpu = true;
   cudaError_t r = cudaMalloc(&cuda_buf, sz * sizeof(float));
   if (r != cudaSuccess){
     printf(cudaGetErrorString(r));
-    printf(", size: %d\n" , sz * sizeof(float));
-  } //else printf("CudaMalloc OK, size: %d\n", sz * sizeof(float));
+    printf(" CudaMalloc error, size: %d\n" , sz * sizeof(float));
+  }
 }
 
 void Tensor::free_cuda_buf() {
   cudaError_t r = cudaFree(cuda_buf);
   if (r != cudaSuccess) printf("CudaFree error, %d, size: %d\n", r, sz*sizeof(float));
+  gpu = false;
 }
 
 void Tensor::set_buf_from_cuda() {
+  if (buf == NULL) buf = (float*)malloc(sz * sizeof(float));
   cudaError_t r = cudaMemcpy(buf, cuda_buf, sz * sizeof(float), cudaMemcpyDeviceToHost);
   if (r != cudaSuccess){
     printf(cudaGetErrorString(r));
@@ -370,6 +379,8 @@ Tensor preprocess(uint8_t *in, size_t num_image) {
 // Inverse of preprocess
 void postprocess_one_image(Tensor input, uint8_t *out, size_t idx) {
   // input shape = (height, width, channels)
+  input.set_buf_from_cuda();
+  cudaDeviceSynchronize();
   size_t H = input.shape[0], W = input.shape[1], C = input.shape[2];
   for (size_t i = 0; i < H * W * C; ++i) {
     float x = (input.buf[i] + 1) / 2 * 255;
@@ -382,31 +393,35 @@ void get_one_image(Tensor input, Tensor &output, size_t idx) {
   // input shape = (num_image, height, width, channels)
   // output shape = (height, width, channels)
   size_t H = input.shape[1], W = input.shape[2], C = input.shape[3];
-  output.alloc_once({H, W, C});
+  output.alloc_on_host({H, W, C});
   for (size_t i = 0; i < H * W * C; ++i) {
     output.buf[i] = input.buf[idx * H * W * C + i];
   }
+  output.set_cuda_buf();
 } 
 
-void matmul(Tensor &A, Tensor B, Tensor &C, size_t M, size_t N, size_t K) {
+void matmul(Tensor A, Tensor B, Tensor &C, size_t M, size_t N, size_t K) {
   // printf("MATMUL: M: %d, N: %d, K: %d\n", M, N, K);
   double start = get_time();
-
 
   assert(A.sz == (M * K));
   assert(B.sz == (K * N));
   assert(C.sz == (M * N));
 
-  A.set_cuda_buf();
-  C.set_cuda_buf();
-  cudaDeviceSynchronize();
   mat_mul(A.cuda_buf, B.cuda_buf, C.cuda_buf, M, N, K);
-  C.set_buf_from_cuda();
-  A.free_cuda_buf();
-  C.free_cuda_buf();
-  cudaDeviceSynchronize();
   matmul_t += (get_time() - start);
+}
 
+__global__ void _im2col(float* input, float* output, int OH, int OW, int R, int S, int C) {
+  int o = blockDim.x * blockIdx.x + threadIdx.x;
+  int rs = blockDim.y * blockIdx.y + threadIdx.y;
+  int H = OH * 2 , W = OW * 2;
+  int oh = o / OW, ow = o % OW;
+  int r = rs / S, s = rs % S;
+  int ih = oh * 2 - 1 + r, iw = ow * 2 - 1 + s;
+  if (ih < 0 || ih >= H || iw < 0 || iw >= W) return;
+  for (int c = 0; c < C; c++)
+    output[(oh * OW + ow) * (R * S * C) + (r * S * C + s * C + c)] = input[ih * W * C + iw * C + c];
 }
 
 // stride = 2, pad = 1
@@ -415,6 +430,7 @@ void im2col(Tensor input, size_t filter_height, size_t filter_width, Tensor &out
   size_t H = input.shape[0], W = input.shape[1], C = input.shape[2];
   size_t OH = H / 2, OW = W / 2, R = filter_height, S = filter_width;
   output.alloc_once({OH, OW, R, S, C});
+  /*
   for (size_t oh = 0; oh < OH; oh++) {
     for (size_t ow = 0; ow < OW; ow++) {
       for (size_t r = 0; r < R; r++) {
@@ -423,13 +439,23 @@ void im2col(Tensor input, size_t filter_height, size_t filter_width, Tensor &out
           int iw = ow * 2 - 1 + s;
           if (ih < 0 || ih >= H || iw < 0 || iw >= W) continue;
           for (size_t c = 0; c < C; c++) {
-            output.buf[(oh * OW + ow) * (R * S * C) + (r * S * C + s * C + c)] = input.buf[ih * W * C + iw * C + c];
+            output.cuda_buf[(oh * OW + ow) * (R * S * C) + (r * S * C + s * C + c)] = input.cuda_buf[ih * W * C + iw * C + c];
           }
         }
       }
     }
   }
+  */
+  dim3 blockDim(1, 1, 1);
+  dim3 gridDim(OH * OW, R * S, 1);
+  _im2col<<<gridDim, blockDim>>>(input.cuda_buf, output.cuda_buf, OH, OW, R, S, C);
+  cudaDeviceSynchronize();
   im2col_t += (get_time() - start);
+}
+
+__global__ void _shift(float* input, float* bias) {
+  int row = blockDim.x * blockIdx.x + threadIdx.x;
+  input[row] = bias[threadIdx.x];
 }
 
 // shift bias
@@ -437,15 +463,18 @@ void shift(Tensor &input, Tensor bias) {
   double start = get_time();
   assert(bias.shape[0] == bias.sz);
   size_t K = bias.sz;
+  /*
   for (size_t i = 0; i < input.sz; i++) {
     input.buf[i] = bias.buf[i % K];
-  }
+  }*/
+  _shift<<<input.sz / K, K>>>(input.cuda_buf, bias.cuda_buf);
+  cudaDeviceSynchronize();
   shift_t += (get_time() - start);
 }
 
 // Convolution (2-dimension, stride = 2, pad = 1)
 // filter_height = filter_width = 4
-void conv2d(Tensor input, Tensor filter, Tensor bias, Tensor &output) {
+void conv2d(Tensor input, Tensor filter, Tensor bias, Tensor &output, Tensor &reshaped_input) {
   double start = get_time();
   // input shape = (in_height, in_width, in_channels)
   // filter shape = (filter_height, filter_width, in_channels, output_channels)
@@ -455,13 +484,25 @@ void conv2d(Tensor input, Tensor filter, Tensor bias, Tensor &output) {
   size_t R = filter.shape[0], S = filter.shape[1], K = filter.shape[3];
   const size_t stride = 2, pad = 1;
   size_t OH = H / stride, OW = W / stride;
-
   output.alloc_once({OH, OW, K});
-  Tensor reshaped_input;
   im2col(input, R, S, reshaped_input);
   shift(output, bias);
   matmul(reshaped_input, filter, output, OH * OW, K, R * S * C);
   conv2d_t += (get_time() - start);
+}
+
+__global__ void _im2col_tr(float* input, float* output, int OH, int OW, int R, int S, int C) {
+  int o = blockDim.x * blockIdx.x + threadIdx.x;
+  int rs = blockDim.y * blockIdx.y + threadIdx.y;
+  int oh = o / OW, ow = o % OW;
+  int H = OW / 2, W = OW / 2;
+  int r = rs / S, s = rs % S;
+  int raw_h = (oh - r + 1), raw_w = (ow - s + 1);
+  if (raw_h % 2 != 0 || raw_w % 2 != 0) return;
+  int ih = raw_h / 2, iw = raw_w / 2;
+  if (ih < 0 || ih >= H || iw < 0 || iw >= W) return;
+  for (int c = 0; c < C; c++)
+    output[(oh * OW + ow) * (R * S * C) + (r * S * C + s * C + c)] = input[ih * W * C + iw * C + c];
 }
 
 void im2col_tr(Tensor input, size_t filter_height, size_t filter_width, Tensor &output) {
@@ -469,6 +510,7 @@ void im2col_tr(Tensor input, size_t filter_height, size_t filter_width, Tensor &
   size_t H = input.shape[0], W = input.shape[1], C = input.shape[2];
   size_t OH = H * 2, OW = W * 2, R = filter_height, S = filter_width;
   output.alloc_once({OH, OW, R, S, C});
+  /*
   for (size_t oh = 0; oh < OH; oh++) {
     for (size_t ow = 0; ow < OW; ow++) {
       for (size_t r = 0; r < R; r++) {
@@ -483,30 +525,59 @@ void im2col_tr(Tensor input, size_t filter_height, size_t filter_width, Tensor &
         }
       }
     }
-  }
+  }*/
+  dim3 blockDim(1, 1, 1);
+  dim3 gridDim(OH * OW, R * S, 1);
+  _im2col_tr<<<gridDim, blockDim>>>(input.cuda_buf, output.cuda_buf, OH, OW, R, S, C);
+  cudaDeviceSynchronize();
   im2col_t += (get_time() - start);
 }
 
-void reshape_filter(Tensor &input) {
+__global__ void _reshape_filter(float *input, float *output, size_t K, size_t C, size_t sz) {
+  int rs = blockDim.x * blockIdx.x + threadIdx.x;
+  int base = rs * K * C;
+  for (size_t k = 0; k < K; k++) {
+    for (size_t c = 0; c < C; c++) {
+      int i1 = base + c * K + k;
+      int i2 = base + k * C + c;
+      if (i1 >= sz || i2 >= sz) printf("Illegal Access, %d %d %d\n", rs, k, c);
+      output[i1] = input[i2];
+    }
+  }
+}
+
+void reshape_filter(Tensor *input) {
   double start = get_time();
-  size_t R = input.shape[0], S = input.shape[1], K = input.shape[2], C = input.shape[3];
+  size_t R = input->shape[0], S = input->shape[1], K = input->shape[2], C = input->shape[3];
+  input->set_buf_from_cuda();
+  cudaDeviceSynchronize();
   float *tmp = (float*) malloc(K*C*sizeof(float));
   for (size_t r = 0; r < R; r++) {
     for (size_t s = 0; s < S; s++) {
       for (size_t k = 0; k < K; k++) {
         for (size_t c = 0; c < C; c++) {
-          tmp[K * c + k] = input.buf[(r * S + s) * K * C + (k * C + c)];
+          tmp[K * c + k] = input->buf[(r * S + s) * K * C + (k * C + c)];
         }
       }
-      memcpy(&input.buf[(r * S + s) * K * C], tmp, K * C * sizeof(float));
+      memcpy(&input->buf[(r * S + s) * K * C], tmp, K * C * sizeof(float));
     }
   }
+  /*
+  printf("Reshape total %d elements\n", input->sz);
+  _reshape_filter<<<R, S>>>(input->buf, tmp, K, C, input->sz);
+  //input.free_cuda_buf();
+  r = cudaDeviceSynchronize();
+  if (r != cudaSuccess){
+    printf(cudaGetErrorString(r));
+    printf(", _reshape_filter Fail, %d, size: %d\n", r, input->sz * sizeof(float));
+  } else printf("Reshape Filter OK\n");*/
+  input->set_cuda_buf();
   reshape_t += (get_time() - start);
 }
 
 
 // Transposed convolution (2-dimension, stride = 2, pad = 1)
-void conv2d_transposed(Tensor input, Tensor filter, Tensor bias, Tensor &output) {
+void conv2d_transposed(Tensor input, Tensor filter, Tensor bias, Tensor &output, Tensor &reshaped_input) {
   double start = get_time();
   // input shape = (in_height, in_width, in_channels)
   // filter shape = (filter_height, filter_width, output_channels, in_channels)
@@ -519,11 +590,16 @@ void conv2d_transposed(Tensor input, Tensor filter, Tensor bias, Tensor &output)
   size_t OH = H * stride, OW = W * stride;
 
   output.alloc_once({OH, OW, K});
-  Tensor reshaped_input;
   im2col_tr(input, R, S, reshaped_input);
   shift(output, bias);
   matmul(reshaped_input, filter, output, OH * OW, K, R * S * C);
+  cudaDeviceSynchronize();
   conv2d_tr_t += (get_time() - start);
+}
+
+__global__ void _leaky_relu(float* input, float* output, float alpha) {
+  int i = blockDim.x * blockIdx.x + threadIdx.x;
+  output[i] = (input[i] >= 0 ?  1 : alpha) * input[i];
 }
 
 // Leaky ReLU
@@ -533,10 +609,18 @@ void leaky_relu(Tensor input, Tensor &output, float alpha) {
   // output shape = (height, width, channels)
   size_t H = input.shape[0], W = input.shape[1], C = input.shape[2];
   output.alloc_once({H, W, C});
+  /*
   for (size_t i = 0; i < H * W * C; ++i) {
     output.buf[i] = input.buf[i] >= 0 ? input.buf[i] : alpha * input.buf[i];
-  }
+  }*/
+  _leaky_relu<<<H*W, C>>>(input.cuda_buf, output.cuda_buf, alpha);
+  cudaDeviceSynchronize();
   leaky_relu_t += (get_time() - start);
+}
+
+__global__ void _relu(float* input, float* output) {
+  int i = blockDim.x * blockIdx.x + threadIdx.x;
+  output[i] = input[i] >= 0 ? input[i] : 0;
 }
 
 // ReLU
@@ -546,10 +630,38 @@ void relu(Tensor input, Tensor &output) {
   // output shape = (height, width, channels)
   size_t H = input.shape[0], W = input.shape[1], C = input.shape[2];
   output.alloc_once({H, W, C});
+  /*
   for (size_t i = 0; i < H * W * C; ++i) {
     output.buf[i] = input.buf[i] >= 0 ? input.buf[i] : 0;
-  }
+  }*/
+  _relu<<<H*W, C>>>(input.cuda_buf, output.cuda_buf);
+  cudaDeviceSynchronize();
   relu_t += (get_time() - start);
+}
+
+__global__ void _batchnorm(float* input, float* scale, float* offset, float* output, size_t H, size_t W, size_t C) {
+  int c = blockDim.x * blockIdx.x + threadIdx.x;
+  float mean = 0, sqsum = 0;
+  int count = 0;
+  for (size_t h = 0; h < H; ++h) {
+    for (size_t w = 0; w < W; ++w) {
+      float ii = input[h * W * C + w * C + c];
+      count++;
+      float tmp = ii - mean;
+      mean += tmp/count;
+      sqsum += tmp * (ii - mean);
+    }
+  }
+
+  float variance = sqsum / count;
+  const float epsilon = 1e-5;
+  for (size_t h = 0; h < H; ++h) {
+    for (size_t w = 0; w < W; ++w) {
+      size_t idx = h * W * C + w * C + c;
+      output[idx] = offset[c] + (input[idx] - mean) * scale[c] / sqrtf(variance + epsilon);
+    }
+  }
+
 }
 
 // Batch normalization (channel-wise)
@@ -561,6 +673,7 @@ void batchnorm(Tensor input, Tensor scale, Tensor offset, Tensor &output) {
   // output shape = (height, width, channels)
   size_t H = input.shape[0], W = input.shape[1], C = input.shape[2];
   output.alloc_once({H, W, C});
+  /*
   for (size_t c = 0; c < C; ++c) {
     float sum = 0;
     for (size_t h = 0; h < H; ++h) {
@@ -587,8 +700,18 @@ void batchnorm(Tensor input, Tensor scale, Tensor offset, Tensor &output) {
         output.buf[idx] = offset.buf[c] + (input.buf[idx] - mean) * scale.buf[c] / sqrtf(variance + epsilon);
       }
     }
-  }
+  }*/
+  _batchnorm<<<C, 1>>>(input.cuda_buf, scale.cuda_buf, offset.cuda_buf, output.cuda_buf, H, W, C);
+  cudaDeviceSynchronize();
   batchnorm_t += (get_time() - start);
+}
+
+__global__ void _concat(float* input0, float* input1, float* output, size_t C0, size_t C1) {
+  int hw = blockDim.x * blockIdx.x + threadIdx.x;
+  for (size_t c = 0; c < C0; c++)
+    output[hw * (C0 + C1) + c] = input0[hw * C0 + c];
+  for (size_t c = 0; c < C1; ++c)
+    output[hw * (C0 + C1) + (C0 + c)] = input1[hw* C1 + c];
 }
 
 // Concatenation (along channel dimension)
@@ -600,6 +723,7 @@ void concat(Tensor input0, Tensor input1, Tensor &output) {
   size_t H = input0.shape[0], W = input0.shape[1], C0 = input0.shape[2];
   size_t C1 = input1.shape[2];
   output.alloc_once({H, W, C0 + C1});
+  /*
   for (size_t h = 0; h < H; ++h) {
     for (size_t w = 0; w < W; ++w) {
       for (size_t c = 0; c < C0; ++c) {
@@ -609,8 +733,15 @@ void concat(Tensor input0, Tensor input1, Tensor &output) {
         output.buf[h * W * (C0 + C1) + w * (C0 + C1) + (C0 + c)] = input1.buf[h * W * C1 + w * C1 + c];
       }
     }
-  }
+  }*/
+  _concat<<<H, W>>>(input0.cuda_buf, input1.cuda_buf, output.cuda_buf, C0, C1);
+  cudaDeviceSynchronize();
   concat_t += (get_time() - start);
+}
+
+__global__ void _elem_tanh(float* input, float* output) {
+  int i = blockDim.x * blockIdx.x + threadIdx.x;
+  output[i] = tanhf(input[i]);
 }
 
 // Elementwise tanh
@@ -620,8 +751,11 @@ void elem_tanh(Tensor input, Tensor &output) {
   // output shape = (height, width, channels)
   size_t H = input.shape[0], W = input.shape[1], C = input.shape[2];
   output.alloc_once({H, W, C});
+  /*
   for (size_t i = 0; i < H * W * C; ++i) {
     output.buf[i] = tanhf(input.buf[i]);
-  }
+  }*/
+  _elem_tanh<<<H * W, C>>>(input.cuda_buf, output.cuda_buf);
+  cudaDeviceSynchronize();
   tanh_t += (get_time() - start);
 }
