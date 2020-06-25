@@ -401,7 +401,7 @@ void matmul(Tensor A, Tensor B, Tensor &C, size_t M, size_t N, size_t K) {
   assert(B.sz == (K * N));
   assert(C.sz == (M * N));
   
-//  printf("%f %f %f %d %d %d\n", C.buf[0], C.buf[1], C.buf[2], M, N, K);
+
   A.set_cuda_buf();
   C.set_cuda_buf();
   cudaDeviceSynchronize();
@@ -411,7 +411,6 @@ void matmul(Tensor A, Tensor B, Tensor &C, size_t M, size_t N, size_t K) {
   A.free_cuda_buf();
   C.free_cuda_buf();
   cudaDeviceSynchronize();
-  printf("%f %f %f %d %d %d\n", C.buf[0], C.buf[1], C.buf[2], M, N, K);
   matmul_t += (get_time() - start);
 }
 
