@@ -55,9 +55,9 @@ static void relu(Tensor input, Tensor &output);
 static void batchnorm(Tensor input, Tensor scale, Tensor offset, Tensor &output);
 static void concat(Tensor input0, Tensor input1, Tensor &output);
 static void elem_tanh(Tensor input, Tensor &output);
-static void reshape_filter(Tensor input);
+static void reshape_filter(Tensor &input);
 
-static void matmul(Tensor A, Tensor B, Tensor &C, size_t M, size_t N, size_t K);
+static void matmul(Tensor &A, Tensor B, Tensor &C, size_t M, size_t N, size_t K);
 
 // Profilers
 static double conv2d_t = 0, conv2d_tr_t = 0, leaky_relu_t = 0, relu_t = 0, batchnorm_t = 0, concat_t = 0, tanh_t = 0;
@@ -95,6 +95,28 @@ void pix2pix(uint8_t *input_buf, float *weight_buf, uint8_t *output_buf, size_t 
 
   // Declare feature maps
   // Memory for feature maps are allocated when they are written first time using Tensor::alloc_once(...)
+/*  Tensor one_image;
+  Tensor encoder_layer_input[9];
+  Tensor encoder_layer_rectified[9];
+  Tensor encoder_layer_convolved[9];
+  Tensor encoder_layer[9];
+  Tensor decoder_layer_input[9];
+  Tensor decoder_layer_rectified[9];
+  Tensor decoder_layer_convolved[9];
+  Tensor decoder_layer[9];*/
+  
+  // reshape filters
+  for (int i = 8; i >= 1; --i) {
+    auto decoder = &weights["generator/decoder_" + std::to_string(i) + "/conv2d_transpose/kernel"];
+    reshape_filter(*decoder);
+    auto encoder = &weights["generator/encoder_" + std::to_string(i) + "/conv2d/kernel"];
+    decoder->set_cuda_buf();
+    encoder->set_cuda_buf();   
+  }
+  cudaDeviceSynchronize();
+  printf("Encoder, Decoder malloc done\n");
+  
+  for (size_t img_idx = 0; img_idx < num_image; ++img_idx) {
   Tensor one_image;
   Tensor encoder_layer_input[9];
   Tensor encoder_layer_rectified[9];
@@ -104,34 +126,6 @@ void pix2pix(uint8_t *input_buf, float *weight_buf, uint8_t *output_buf, size_t 
   Tensor decoder_layer_rectified[9];
   Tensor decoder_layer_convolved[9];
   Tensor decoder_layer[9];
-  
-  // reshape filters
-  for (int i = 8; i >= 1; --i) {
-    auto decoder = &weights["generator/decoder_" + std::to_string(i) + "/conv2d_transpose/kernel"];
-    reshape_filter(*decoder);
-    auto encoder = &weights["generator/encoder_" + std::to_string(i) + "/conv2d/kernel"];
-/*
-    float *d_t = (float*)malloc(sizeof(float) * decoder->sz);
-    size_t d_n = decoder->shape[3], d_k = decoder->sz / d_n;
-
-    for (int j = 0; j < d_k; j++)
-      for (int k = 0; k < d_n; k++)
-        d_t[d_k * k + j] = decoder->buf[d_n * j + k];
-    decoder->buf = d_t;*/
-    decoder->set_cuda_buf();
-/*
-    float *e_t = (float*)malloc(sizeof(float) * encoder->sz);
-    size_t e_n = encoder->shape[3], e_k = encoder->sz / e_n;
-    for (int j = 0; j < e_k; j++)
-      for (int k = 0; k < e_n; k++)
-        e_t[e_k * k + j] = encoder->buf[e_n * j + k];
-    encoder->buf = e_t;*/
-    encoder->set_cuda_buf();   
-  }
-  cudaDeviceSynchronize();
-  printf("Encoder, Decoder malloc done\n");
-  
-  for (size_t img_idx = 0; img_idx < num_image; ++img_idx) {
     // Pick 1 image out of num_image
     get_one_image(input, one_image, img_idx);
 
@@ -394,24 +388,25 @@ void get_one_image(Tensor input, Tensor &output, size_t idx) {
   }
 } 
 
-void matmul(Tensor A, Tensor B, Tensor &C, size_t M, size_t N, size_t K) {
+void matmul(Tensor &A, Tensor B, Tensor &C, size_t M, size_t N, size_t K) {
   // printf("MATMUL: M: %d, N: %d, K: %d\n", M, N, K);
   double start = get_time();
+
+
   assert(A.sz == (M * K));
   assert(B.sz == (K * N));
   assert(C.sz == (M * N));
-  
 
   A.set_cuda_buf();
   C.set_cuda_buf();
   cudaDeviceSynchronize();
   mat_mul(A.cuda_buf, B.cuda_buf, C.cuda_buf, M, N, K);
   C.set_buf_from_cuda();
-  cudaDeviceSynchronize();
   A.free_cuda_buf();
   C.free_cuda_buf();
   cudaDeviceSynchronize();
   matmul_t += (get_time() - start);
+
 }
 
 // stride = 2, pad = 1
@@ -438,7 +433,7 @@ void im2col(Tensor input, size_t filter_height, size_t filter_width, Tensor &out
 }
 
 // shift bias
-void shift(Tensor input, Tensor bias) {
+void shift(Tensor &input, Tensor bias) {
   double start = get_time();
   assert(bias.shape[0] == bias.sz);
   size_t K = bias.sz;
@@ -492,7 +487,7 @@ void im2col_tr(Tensor input, size_t filter_height, size_t filter_width, Tensor &
   im2col_t += (get_time() - start);
 }
 
-void reshape_filter(Tensor input) {
+void reshape_filter(Tensor &input) {
   double start = get_time();
   size_t R = input.shape[0], S = input.shape[1], K = input.shape[2], C = input.shape[3];
   float *tmp = (float*) malloc(K*C*sizeof(float));
