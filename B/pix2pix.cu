@@ -110,10 +110,10 @@ void pix2pix(uint8_t *input_buf, float *weight_buf, uint8_t *output_buf, size_t 
     auto decoder = &weights["generator/decoder_" + std::to_string(i) + "/conv2d_transpose/kernel"];
     reshape_filter(*decoder);
     auto encoder = &weights["generator/encoder_" + std::to_string(i) + "/conv2d/kernel"];
-
+/*
     float *d_t = (float*)malloc(sizeof(float) * decoder->sz);
     size_t d_n = decoder->shape[3], d_k = decoder->sz / d_n;
-/*
+
     for (int j = 0; j < d_k; j++)
       for (int k = 0; k < d_n; k++)
         d_t[d_k * k + j] = decoder->buf[d_n * j + k];
@@ -124,12 +124,12 @@ void pix2pix(uint8_t *input_buf, float *weight_buf, uint8_t *output_buf, size_t 
     size_t e_n = encoder->shape[3], e_k = encoder->sz / e_n;
     for (int j = 0; j < e_k; j++)
       for (int k = 0; k < e_n; k++)
-        e_t[d_k * k + j] = encoder->buf[d_n * j + k];
+        e_t[e_k * k + j] = encoder->buf[e_n * j + k];
     encoder->buf = e_t;*/
     encoder->set_cuda_buf();   
   }
   cudaDeviceSynchronize();
-  printf("Encoder, Decoder malloc done");
+  printf("Encoder, Decoder malloc done\n");
   
   for (size_t img_idx = 0; img_idx < num_image; ++img_idx) {
     // Pick 1 image out of num_image
@@ -411,7 +411,7 @@ void matmul(Tensor A, Tensor B, Tensor &C, size_t M, size_t N, size_t K) {
   A.free_cuda_buf();
   C.free_cuda_buf();
   cudaDeviceSynchronize();
-//  printf("%f %f %f %d %d %d\n", C.buf[0], C.buf[1], C.buf[2], M, N, K);
+  printf("%f %f %f %d %d %d\n", C.buf[0], C.buf[1], C.buf[2], M, N, K);
   matmul_t += (get_time() - start);
 }
 
