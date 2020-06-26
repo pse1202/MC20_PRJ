@@ -1,1 +1,1 @@
-../common/diffrgb myoutput.rgb ../common/examples/output_512.rgb
+../common/diffrgb myoutput.rgb ../common/examples/output_2048.rgb

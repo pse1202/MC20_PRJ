@@ -1,7 +1,6 @@
-#include "pix2pix.h"
-
 #include "util.h"
 #include "matmul.h"
+#include "kernel.h"
 #include <string>
 #include <map>
 #include <cmath>
@@ -9,7 +8,6 @@
 #include <cstring>
 #include <algorithm>
 #include <stdio.h>
-#include <pthread.h>
 #include <cuda_runtime.h>
 
 #define ceil(n,m) (((n -  1) % m) + 1)
@@ -67,20 +65,7 @@ static void matmul(Tensor A, Tensor B, Tensor &C, size_t M, size_t N, size_t K);
 static double conv2d_t = 0, conv2d_tr_t = 0, leaky_relu_t = 0, relu_t = 0, batchnorm_t = 0, concat_t = 0, tanh_t = 0;
 static double im2col_t = 0, shift_t = 0, reshape_t = 0, matmul_t = 0;
 
-void pix2pix_init() {
-  /*
-   * You can do input-independent and input-size-independent jobs here.
-   * e.g., Getting OpenCL platform, Compiling OpenCL kernel, ...
-   * Execution time of this function is not measured, so do as much as possible!
-   */ 
-
-  int x;
-  cudaGetDeviceCount(&x);
-  printf("Total # of GPUS: %d\n", x);
-  cudaDeviceSynchronize();
-}
-
-void pix2pix(uint8_t *input_buf, float *weight_buf, uint8_t *output_buf, size_t num_image) {
+void _pix2pix(uint8_t *input_buf, float *weight_buf, uint8_t *output_buf, size_t num_image) {
   /*
    * !!!!!!!! Caution !!!!!!!!
    * In MPI program, all buffers and num_image are only given to rank 0 process.
@@ -89,7 +74,7 @@ void pix2pix(uint8_t *input_buf, float *weight_buf, uint8_t *output_buf, size_t 
    *   2. send inputs from rank 0 to others
    *   3. gather outputs from others to rank 0
    */
-
+  
   std::map<std::string, Tensor> weights[GPUS];
   for (size_t GPU = 0; GPU < GPUS; GPU++) {
     cudaSetDevice(GPU);
@@ -242,9 +227,7 @@ void pix2pix(uint8_t *input_buf, float *weight_buf, uint8_t *output_buf, size_t 
         }
       }
     }
-    //printf("Image %d to %d done\n", img_idx, img_idx + curr_images);
   }
-
   printf("Conv2D: %f\n", conv2d_t);
   printf("Conv2D Transpose: %f\n", conv2d_tr_t);
   printf("LeakyRelu: %f\n", leaky_relu_t);
