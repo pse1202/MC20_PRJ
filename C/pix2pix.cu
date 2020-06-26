@@ -14,6 +14,7 @@
 
 #define ceil(n,m) (((n -  1) % m) + 1)
 
+const size_t GPUS = 4;
 const static size_t BATCH = 4;
 
 class Tensor {
@@ -72,9 +73,12 @@ void pix2pix_init() {
    * e.g., Getting OpenCL platform, Compiling OpenCL kernel, ...
    * Execution time of this function is not measured, so do as much as possible!
    */ 
-   cudaSetDevice(0);
-}
 
+  int x;
+  cudaGetDeviceCount(&x);
+  printf("Total # of GPUS: %d\n", x);
+  cudaDeviceSynchronize();
+}
 
 void pix2pix(uint8_t *input_buf, float *weight_buf, uint8_t *output_buf, size_t num_image) {
   /*
@@ -86,35 +90,54 @@ void pix2pix(uint8_t *input_buf, float *weight_buf, uint8_t *output_buf, size_t 
    *   3. gather outputs from others to rank 0
    */
 
-  auto weights = register_weights(weight_buf); // Memory allocated for weights
+  std::map<std::string, Tensor> weights[GPUS];
+  for (size_t GPU = 0; GPU < GPUS; GPU++) {
+    cudaSetDevice(GPU);
+    weights[GPU] = register_weights(weight_buf); // Memory allocated for weights
+  }
   auto input = preprocess(input_buf, num_image); // Memory allocated for input
+
+  printf("Weights & Preprocess Done\n");
 
   // Declare feature maps
   // Memory for feature maps are allocated when they are written first time using Tensor::alloc_once(...)
-  Tensor one_image[BATCH];
-  Tensor encoder_layer_input[BATCH][9];
-  Tensor encoder_layer_rectified[BATCH][9];
-  Tensor encoder_layer_reshaped[BATCH][9];
-  Tensor encoder_layer_convolved[BATCH][9];
-  Tensor encoder_layer[BATCH][9];
-  Tensor decoder_layer_input[BATCH][9];
-  Tensor decoder_layer_rectified[BATCH][9];
-  Tensor decoder_layer_reshaped[BATCH][9];
-  Tensor decoder_layer_convolved[BATCH][9];
-  Tensor decoder_layer[BATCH][9];
+  Tensor one_image[GPUS][BATCH];
+  Tensor encoder_layer_input[GPUS][BATCH][9];
+  Tensor encoder_layer_rectified[GPUS][BATCH][9];
+  Tensor encoder_layer_reshaped[GPUS][BATCH][9];
+  Tensor encoder_layer_convolved[GPUS][BATCH][9];
+  Tensor encoder_layer[GPUS][BATCH][9];
+  Tensor decoder_layer_input[GPUS][BATCH][9];
+  Tensor decoder_layer_rectified[GPUS][BATCH][9];
+  Tensor decoder_layer_reshaped[GPUS][BATCH][9];
+  Tensor decoder_layer_convolved[GPUS][BATCH][9];
+  Tensor decoder_layer[GPUS][BATCH][9];
   
   // reshape filters
   for (int i = 8; i >= 1; --i) {
-    auto decoder = &weights["generator/decoder_" + std::to_string(i) + "/conv2d_transpose/kernel"];
-    reshape_filter(decoder);
+    for (size_t GPU = 0; GPU < GPUS; GPU++) {
+      cudaSetDevice(GPU);
+      auto decoder = &weights[GPU]["generator/decoder_" + std::to_string(i) + "/conv2d_transpose/kernel"];
+      reshape_filter(decoder);
+    }
   }
-  cudaDeviceSynchronize();
   
-  for (size_t img_idx = 0; img_idx < num_image; img_idx += BATCH) {
-    size_t curr_batch = (num_image - img_idx) < BATCH ? num_image - img_idx : BATCH;
+  size_t curr_batch[GPUS];
+
+  for (size_t img_idx = 0; img_idx < num_image; img_idx += GPUS * BATCH) {
+    size_t total_images = (num_image - img_idx) < GPUS * BATCH ? (num_image - img_idx) : GPUS * BATCH;
+    size_t curr_images = total_images >= 4 ? 4 : total_images;
+    for (size_t GPU = 0; GPU < curr_images; GPU++) {
+      curr_batch[GPU] = (total_images / GPUS) + ((total_images % GPUS > GPU) ? 1 : 0);
+    }
+    
     // Pick 1 image out of num_image
-    for (size_t batch = 0; batch < curr_batch; batch++)
-      get_one_image(input, one_image[batch], img_idx + batch);
+    int curr_img_idx = img_idx;
+    for (size_t GPU = 0; GPU < curr_images; GPU++) {
+      cudaSetDevice(GPU);
+      for (size_t batch = 0; batch < curr_batch[GPU]; batch++)
+        get_one_image(input, one_image[GPU][batch], curr_img_idx++);
+    }
 
     /*
      * Encoding phase
@@ -122,25 +145,32 @@ void pix2pix(uint8_t *input_buf, float *weight_buf, uint8_t *output_buf, size_t 
 
     // Encoder 1 : conv
 
-    auto filter = weights["generator/encoder_1/conv2d/kernel"];
-    auto bias = weights["generator/encoder_1/conv2d/bias"];
-    for (size_t batch = 0; batch < curr_batch; batch++)
-      conv2d(one_image[batch], filter, bias, encoder_layer[batch][1], encoder_layer_reshaped[batch][1]);
+    for (size_t GPU = 0; GPU < curr_images; GPU++) {
+      cudaSetDevice(GPU);
+      auto filter = weights[GPU]["generator/encoder_1/conv2d/kernel"];
+      auto bias = weights[GPU]["generator/encoder_1/conv2d/bias"];
+      for (size_t batch = 0; batch < curr_batch[GPU]; batch++)
+          conv2d(one_image[GPU][batch], filter, bias, encoder_layer[GPU][batch][1], encoder_layer_reshaped[GPU][batch][1]);
+    }
 
     for (int i = 2; i <= 8; ++i) {
       // Encoder i : leaky_relu => conv2d => batchnorm
-      auto scope = "generator/encoder_" + std::to_string(i);
-      auto filter = weights[scope + "/conv2d/kernel"];
-      auto bias = weights[scope + "/conv2d/bias"];
-      auto scale = weights[scope + "/batch_normalization/gamma"];
-      auto offset = weights[scope + "/batch_normalization/beta"];
-      for (size_t batch = 0; batch < curr_batch; batch++) {
-        encoder_layer_input[batch][i] = encoder_layer[batch][i - 1];
-        leaky_relu(encoder_layer_input[batch][i], encoder_layer_rectified[batch][i], 0.2);
-        conv2d(encoder_layer_rectified[batch][i], filter, bias, encoder_layer_convolved[batch][i], encoder_layer_reshaped[batch][i]);
-        batchnorm(encoder_layer_convolved[batch][i], scale, offset, encoder_layer[batch][i]);
+      for (size_t GPU = 0; GPU < curr_images; GPU++) {
+        cudaSetDevice(GPU);
+        auto scope = "generator/encoder_" + std::to_string(i);
+        auto filter = weights[GPU][scope + "/conv2d/kernel"];
+        auto bias = weights[GPU][scope + "/conv2d/bias"];
+        auto scale = weights[GPU][scope + "/batch_normalization/gamma"];
+        auto offset = weights[GPU][scope + "/batch_normalization/beta"];
+        for (size_t batch = 0; batch < curr_batch[GPU]; batch++) {
+          encoder_layer_input[GPU][batch][i] = encoder_layer[GPU][batch][i - 1];
+          leaky_relu(encoder_layer_input[GPU][batch][i], encoder_layer_rectified[GPU][batch][i], 0.2);
+          conv2d(encoder_layer_rectified[GPU][batch][i], filter, bias, encoder_layer_convolved[GPU][batch][i], encoder_layer_reshaped[GPU][batch][i]);
+          batchnorm(encoder_layer_convolved[GPU][batch][i], scale, offset, encoder_layer[GPU][batch][i]);
+        }
       }
     }
+
 
     /*
      * Decoding phase
@@ -148,38 +178,71 @@ void pix2pix(uint8_t *input_buf, float *weight_buf, uint8_t *output_buf, size_t 
 
     for (int i = 8; i >= 1; --i) {
       // Decoder i : relu => conv2d_transposed => batchnorm
-      auto scope = "generator/decoder_" + std::to_string(i);
-      auto filter = weights[scope + "/conv2d_transpose/kernel"];
-      auto bias = weights[scope + "/conv2d_transpose/bias"];
-      auto scale = weights[scope + "/batch_normalization/gamma"];
-      auto offset = weights[scope + "/batch_normalization/beta"];
-      for (size_t batch = 0; batch < curr_batch; batch++) {
-        if (i == 8) {
-          // For decoder 8, input is last layer of encoder
-          decoder_layer_input[batch][i] = encoder_layer[batch][8];
-        } else {
-          // For other decoder, input is concatenation of previous layer and corresponding encoder layer
-          concat(decoder_layer[batch][i + 1], encoder_layer[batch][i], decoder_layer_input[batch][i]);
-        }
-        relu(decoder_layer_input[batch][i], decoder_layer_rectified[batch][i]);
-        conv2d_transposed(decoder_layer_rectified[batch][i], filter, bias, decoder_layer_convolved[batch][i], decoder_layer_reshaped[batch][i]);
+      for (size_t GPU = 0; GPU < curr_images; GPU++) {
+        cudaSetDevice(GPU);
+        auto scope = "generator/decoder_" + std::to_string(i);
+        auto filter = weights[GPU][scope + "/conv2d_transpose/kernel"];
+        auto bias = weights[GPU][scope + "/conv2d_transpose/bias"];
+        auto scale = weights[GPU][scope + "/batch_normalization/gamma"];
+        auto offset = weights[GPU][scope + "/batch_normalization/beta"];
+        for (size_t batch = 0; batch < curr_batch[GPU]; batch++) {
+          if (i == 8) {
+            // For decoder 8, input is last layer of encoder
+            decoder_layer_input[GPU][batch][i] = encoder_layer[GPU][batch][8];
+          } else {
+            // For other decoder, input is concatenation of previous layer and corresponding encoder layer
+            concat(decoder_layer[GPU][batch][i + 1], encoder_layer[GPU][batch][i], decoder_layer_input[GPU][batch][i]);
+          }
+          relu(decoder_layer_input[GPU][batch][i], decoder_layer_rectified[GPU][batch][i]);
+          conv2d_transposed(decoder_layer_rectified[GPU][batch][i], filter, bias, decoder_layer_convolved[GPU][batch][i], decoder_layer_reshaped[GPU][batch][i]);
 
-        // Last decoder does not have batchnorm
-        if (i == 1) continue;
-        batchnorm(decoder_layer_convolved[batch][i], scale, offset, decoder_layer[batch][i]);
+          // Last decoder does not have batchnorm
+          if (i == 1) continue;
+          batchnorm(decoder_layer_convolved[GPU][batch][i], scale, offset, decoder_layer[GPU][batch][i]);
+        }
       }
     }
 
+
     // Convert values into [-1, 1] using tanh function
-    for (size_t batch = 0; batch < curr_batch; batch++) {
-      elem_tanh(decoder_layer_convolved[batch][1], decoder_layer[batch][1]);
+    for (size_t GPU = 0; GPU < curr_images; GPU++) {
+      cudaSetDevice(GPU);
+      for (size_t batch = 0; batch < curr_batch[GPU]; batch++)
+        elem_tanh(decoder_layer_convolved[GPU][batch][1], decoder_layer[GPU][batch][1]);
     }
 
+    /*
+    void postprocess_one_image(Tensor input, uint8_t *out, size_t idx) {
+    // input shape = (height, width, channels)
+    input.set_buf_from_cuda();
+    cudaDeviceSynchronize();
+    size_t H = input.shape[0], W = input.shape[1], C = input.shape[2];
+    for (size_t i = 0; i < H * W * C; ++i) {
+    float x = (input.buf[i] + 1) / 2 * 255;
+    out[idx * (H * W * C) + i] = x < 0 ? 0 : (x > 255 ? 255 : x);
+  }
+}
+    */
+
     // Put a image into output buffer
-    for (size_t batch = 0; batch < curr_batch; batch++) {
-      postprocess_one_image(decoder_layer[batch][1], output_buf, img_idx + batch);
-      printf("Image %d done\n", img_idx + batch);
+    curr_img_idx = img_idx;
+    for (size_t GPU = 0; GPU < curr_images; GPU++) {
+      cudaSetDevice(GPU);
+      for (size_t batch = 0; batch < curr_batch[GPU]; batch++) {
+        decoder_layer[GPU][batch][1].set_buf_from_cuda();
+      }
+      cudaDeviceSynchronize();
+      for (size_t batch = 0; batch < curr_batch[GPU]; batch++) {
+        Tensor input = decoder_layer[GPU][batch][1];
+        size_t H = input.shape[0], W = input.shape[1], C = input.shape[2];
+        size_t idx = curr_img_idx++;
+        for (size_t i = 0; i < H * W * C; ++i) {
+          float x = (input.buf[i] + 1) / 2 * 255;
+          output_buf[idx * (H * W * C) + i] = x < 0 ? 0 : (x > 255 ? 255 : x);
+        }
+      }
     }
+    //printf("Image %d to %d done\n", img_idx, img_idx + curr_images);
   }
 
   printf("Conv2D: %f\n", conv2d_t);
@@ -234,7 +297,7 @@ void Tensor::set_sz() {
 
 void Tensor::set_cuda_buf() {
   init_cuda_buf();
-  cudaError_t r = cudaMemcpy(cuda_buf, buf, sz * sizeof(float), cudaMemcpyHostToDevice);
+  cudaError_t r = cudaMemcpyAsync(cuda_buf, buf, sz * sizeof(float), cudaMemcpyHostToDevice);
   if (r != cudaSuccess) {
     printf(cudaGetErrorString(r));
     printf(", SetCudaBuf error, %d, size: %d\n", r, sz*sizeof(float));
@@ -263,7 +326,7 @@ void Tensor::free_cuda_buf() {
 
 void Tensor::set_buf_from_cuda() {
   if (buf == NULL) buf = (float*)malloc(sz * sizeof(float));
-  cudaError_t r = cudaMemcpy(buf, cuda_buf, sz * sizeof(float), cudaMemcpyDeviceToHost);
+  cudaError_t r = cudaMemcpyAsync(buf, cuda_buf, sz * sizeof(float), cudaMemcpyDeviceToHost);
   if (r != cudaSuccess){
     printf(cudaGetErrorString(r));
     printf(", SetBufFromCuda Fail, %d, size: %d\n", r, sz*sizeof(float));
@@ -385,6 +448,7 @@ Tensor preprocess(uint8_t *in, size_t num_image) {
 void postprocess_one_image(Tensor input, uint8_t *out, size_t idx) {
   // input shape = (height, width, channels)
   input.set_buf_from_cuda();
+  cudaDeviceSynchronize();
   size_t H = input.shape[0], W = input.shape[1], C = input.shape[2];
   for (size_t i = 0; i < H * W * C; ++i) {
     float x = (input.buf[i] + 1) / 2 * 255;
@@ -438,7 +502,6 @@ void im2col(Tensor input, size_t filter_height, size_t filter_width, Tensor &out
   dim3 blockDim(1, 1, 1);
   dim3 gridDim(OH * OW, R * S, 1);
   _im2col<<<gridDim, blockDim>>>(input.cuda_buf, output.cuda_buf, OH, OW, R, S, C);
-  cudaDeviceSynchronize();
   im2col_t += (get_time() - start);
 }
 
@@ -453,7 +516,6 @@ void shift(Tensor &input, Tensor bias) {
   assert(bias.shape[0] == bias.sz);
   size_t K = bias.sz;
   _shift<<<input.sz / K, K>>>(input.cuda_buf, bias.cuda_buf);
-  cudaDeviceSynchronize();
   shift_t += (get_time() - start);
 }
 
@@ -498,7 +560,6 @@ void im2col_tr(Tensor input, size_t filter_height, size_t filter_width, Tensor &
   dim3 blockDim(1, 1, 1);
   dim3 gridDim(OH * OW, R * S, 1);
   _im2col_tr<<<gridDim, blockDim>>>(input.cuda_buf, output.cuda_buf, OH, OW, R, S, C);
-  cudaDeviceSynchronize();
   im2col_t += (get_time() - start);
 }
 
@@ -554,7 +615,6 @@ void conv2d_transposed(Tensor input, Tensor filter, Tensor bias, Tensor &output,
   im2col_tr(input, R, S, reshaped_input);
   shift(output, bias);
   matmul(reshaped_input, filter, output, OH * OW, K, R * S * C);
-  cudaDeviceSynchronize();
   conv2d_tr_t += (get_time() - start);
 }
 
@@ -571,7 +631,6 @@ void leaky_relu(Tensor input, Tensor &output, float alpha) {
   size_t H = input.shape[0], W = input.shape[1], C = input.shape[2];
   output.alloc_once({H, W, C});
   _leaky_relu<<<H*W, C>>>(input.cuda_buf, output.cuda_buf, alpha);
-  cudaDeviceSynchronize();
   leaky_relu_t += (get_time() - start);
 }
 
@@ -588,7 +647,6 @@ void relu(Tensor input, Tensor &output) {
   size_t H = input.shape[0], W = input.shape[1], C = input.shape[2];
   output.alloc_once({H, W, C});
   _relu<<<H*W, C>>>(input.cuda_buf, output.cuda_buf);
-  cudaDeviceSynchronize();
   relu_t += (get_time() - start);
 }
 
@@ -627,7 +685,6 @@ void batchnorm(Tensor input, Tensor scale, Tensor offset, Tensor &output) {
   size_t H = input.shape[0], W = input.shape[1], C = input.shape[2];
   output.alloc_once({H, W, C});
   _batchnorm<<<C, 1>>>(input.cuda_buf, scale.cuda_buf, offset.cuda_buf, output.cuda_buf, H, W, C);
-  cudaDeviceSynchronize();
   batchnorm_t += (get_time() - start);
 }
 
@@ -649,7 +706,6 @@ void concat(Tensor input0, Tensor input1, Tensor &output) {
   size_t C1 = input1.shape[2];
   output.alloc_once({H, W, C0 + C1});
   _concat<<<H, W>>>(input0.cuda_buf, input1.cuda_buf, output.cuda_buf, C0, C1);
-  cudaDeviceSynchronize();
   concat_t += (get_time() - start);
 }
 
@@ -666,6 +722,5 @@ void elem_tanh(Tensor input, Tensor &output) {
   size_t H = input.shape[0], W = input.shape[1], C = input.shape[2];
   output.alloc_once({H, W, C});
   _elem_tanh<<<H * W, C>>>(input.cuda_buf, output.cuda_buf);
-  cudaDeviceSynchronize();
   tanh_t += (get_time() - start);
 }
